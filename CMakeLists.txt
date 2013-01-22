@@ -17,27 +17,25 @@
 # under the License.
 #
 
-
 cmake_minimum_required (VERSION 2.6)
+
+find_library(PROTON_LIB qpid-proton
+             PATH "${PROTON_SOURCE_DIR}/build")
+find_path(PROTON_INCLUDE proton/driver.h
+          PATH "${PROTON_SOURCE_DIR}/include")
+
+message( "PROTON_LIB set to ${PROTON_LIB}" )
+message( "PROTON_INCLUDE set to ${PROTON_INCLUDE}" )
 
 # verify path to proton-c has been configured
 #
-message ( "PROTON_SOURCE_DIR set to ${PROTON_SOURCE_DIR}" )
-include_directories ("${PROTON_SOURCE_DIR}/include")
-link_directories ("${PROTON_SOURCE_DIR}/build")
-find_path( _PROTON_INCLUDE_PATH_
-           NAMES messenger.h message.h
-           PATHS "${PROTON_SOURCE_DIR}/include"
-           PATH_SUFFIXES proton )
-if (_PROTON_INCLUDE_PATH_ STREQUAL _PROTON_INCLUDE_PATH_-NOTFOUND)
-   message( FATAL_ERROR "Proton not found: use 'cmake -DPROTON_SOURCE_DIR=' to set the location of the proton-c directory")
-endif (_PROTON_INCLUDE_PATH_ STREQUAL _PROTON_INCLUDE_PATH_-NOTFOUND)
-find_path( _PROTON_LIB_PATH_
-           NAMES "libqpid-proton.so"
-           PATHS "${PROTON_SOURCE_DIR}/build")
-if (_PROTON_LIB_PATH_ STREQUAL _PROTON_LIB_PATH_-NOTFOUND)
-   message( FATAL_ERROR "Proton library not found in ${PROTON_SOURCE_DIR}/build")
-endif (_PROTON_LIB_PATH_ STREQUAL _PROTON_LIB_PATH_-NOTFOUND)
+if (PROTON_LIB STREQUAL PROTON_LIB-NOTFOUND)
+   message( FATAL_ERROR "Proton libraries not found: use 'cmake -DPROTON_SOURCE_DIR=' to set the location of the proton-c directory")
+endif (PROTON_LIB STREQUAL PROTON_LIB-NOTFOUND)
+
+if (PROTON_INCLUDE STREQUAL PROTON_INCLUDE-NOTFOUND)
+   message( FATAL_ERROR "Proton include files not found: 'cmake -DPROTON_SOURCE_DIR=' to set the location of the proton-c directory")
+endif (PROTON_INCLUDE STREQUAL PROTON_INCLUDE-NOTFOUND)
 
 if (CMAKE_COMPILER_IS_GNUCC)
   if (ENABLE_WARNING_ERROR)
