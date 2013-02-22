@@ -45,7 +45,7 @@ void die(const char *file, int line, const char *message)
 typedef struct options_t {
   char *address;
   uint64_t msg_count;
-  uint32_t window;
+  int32_t credit;
   char *certificate;
   char *privatekey;
   char *password;
@@ -56,7 +56,7 @@ static void usage(int rc)
   printf("Usage: recv [options] <addr>\n");
   printf("-a    \tAddress to listen on [amqp://~0.0.0.0]\n");
   printf("-c    \tNumber of messages to receive [0=forever]\n");
-  printf("-w    \tWindow size [100]\n");
+  printf("-r    \t# messages per call to recv [2048]\n");
   printf("-C    \tPath to the certificate file.\n");
   printf("-K    \tPath to the private key file.\n");
   printf("-P    \tPassword for the private key.\n");
@@ -70,9 +70,9 @@ static void parse_options( int argc, char **argv, options_t *opts )
 
   memset( opts, 0, sizeof(*opts) );
   opts->address = "amqp://~0.0.0.0";
-  opts->window = 100;
+  opts->credit = 2048;
 
-  while((c = getopt(argc, argv, "ha:c:w:C:K:P:")) != -1)
+  while((c = getopt(argc, argv, "ha:c:r:C:K:P:")) != -1)
   {
     switch(c)
     {
@@ -83,8 +83,8 @@ static void parse_options( int argc, char **argv, options_t *opts )
         usage(1);
       }
       break;
-    case 'w':
-      if (sscanf( optarg, "%u", &opts->window ) != 1) {
+    case 'r':
+      if (sscanf( optarg, "%d", &opts->credit ) != 1) {
         fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
         usage(1);
       }
@@ -159,7 +159,7 @@ int main(int argc, char** argv)
 
   while (!opts.msg_count || count < opts.msg_count) {
 
-    pn_messenger_recv(messenger, (opts.window ? opts.window : 1));
+    pn_messenger_recv(messenger, (opts.credit ? opts.credit : -1));
     check(messenger);
 
     while (pn_messenger_incoming(messenger))

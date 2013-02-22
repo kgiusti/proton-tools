@@ -20,9 +20,9 @@
 cmake_minimum_required (VERSION 2.6)
 
 find_library(PROTON_LIB qpid-proton
-             PATH "${PROTON_SOURCE_DIR}/build")
+             PATH "${PROTON_SOURCE_DIR}/build/proton-c")
 find_path(PROTON_INCLUDE proton/driver.h
-          PATH "${PROTON_SOURCE_DIR}/include")
+          PATH "${PROTON_SOURCE_DIR}/proton-c/include")
 
 message( "PROTON_LIB set to ${PROTON_LIB}" )
 message( "PROTON_INCLUDE set to ${PROTON_INCLUDE}" )
@@ -36,6 +36,7 @@ endif (PROTON_LIB STREQUAL PROTON_LIB-NOTFOUND)
 if (PROTON_INCLUDE STREQUAL PROTON_INCLUDE-NOTFOUND)
    message( FATAL_ERROR "Proton include files not found: 'cmake -DPROTON_SOURCE_DIR=' to set the location of the proton-c directory")
 endif (PROTON_INCLUDE STREQUAL PROTON_INCLUDE-NOTFOUND)
+include_directories ("${PROTON_INCLUDE}")
 
 if (CMAKE_COMPILER_IS_GNUCC)
   if (ENABLE_WARNING_ERROR)
@@ -50,8 +51,8 @@ set (CMAKE_BUILD_TYPE RelWithDebInfo)
 add_executable(perf-recv perf-recv.c)
 add_executable(perf-send perf-send.c)
 
-target_link_libraries(perf-recv qpid-proton)
-target_link_libraries(perf-send qpid-proton)
+target_link_libraries(perf-recv ${PROTON_LIB})
+target_link_libraries(perf-send ${PROTON_LIB})
 
 set_target_properties (
   perf-recv perf-send

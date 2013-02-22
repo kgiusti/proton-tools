@@ -47,7 +47,7 @@ typedef struct options_t {
   uint64_t msg_count;
   uint32_t msg_size;
   uint32_t add_headers;
-  uint32_t window;
+  uint32_t put_count;
 } options_t;
 
 static void usage(int rc)
@@ -57,7 +57,7 @@ static void usage(int rc)
   printf("-c     \tNumber of messages to send [500000]\n");
   printf("-s     \tSize of message body in bytes [1024]\n");
   printf("-p     \t*TODO* Add N sample properties to each message [3]\n");
-  printf("-w     \tWindow size [100]\n");
+  printf("-b     \t# messages to put before calling send [1024]\n");
   exit(rc);
 }
 
@@ -71,9 +71,9 @@ static void parse_options( int argc, char **argv, options_t *opts )
   opts->msg_count = 5000000;
   opts->msg_size  = 1024;
   opts->add_headers = 3;
-  opts->window = 100;
+  opts->put_count = 1024;
 
-  while((c = getopt(argc, argv, "a:c:s:p:w:")) != -1) {
+  while((c = getopt(argc, argv, "a:c:s:p:b:")) != -1) {
     switch(c) {
     case 'a': opts->address = optarg; break;
     case 'c':
@@ -93,8 +93,8 @@ static void parse_options( int argc, char **argv, options_t *opts )
         fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
         usage(1);
       }
-    case 'w':
-      if (sscanf( optarg, "%u", &opts->window ) != 1) {
+    case 'b':
+      if (sscanf( optarg, "%u", &opts->put_count ) != 1) {
         fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
         usage(1);
       }
@@ -146,9 +146,9 @@ int main(int argc, char** argv)
 
 
   messenger = pn_messenger( argv[0] );
-  if (opts.window) {
-    pn_messenger_set_outgoing_window( messenger, opts.window );
-  }
+  //  if (opts.window) {
+  //    pn_messenger_set_outgoing_window( messenger, opts.window );
+  //  }
   pn_messenger_start(messenger);
 
   pn_timestamp_t start = pn_i_now();
@@ -156,7 +156,7 @@ int main(int argc, char** argv)
   for (uint64_t i = 1; i <= opts.msg_count; ++i) {
 
     pn_messenger_put(messenger, message);
-    if (opts.window > 0 && (i % opts.window)) {
+    if (opts.put_count > 0 && (i % opts.put_count == 0) ) {
       pn_messenger_send(messenger);
     }
   }
