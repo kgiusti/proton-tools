@@ -46,6 +46,7 @@ typedef struct options_t {
   char *address;
   uint64_t msg_count;
   int32_t credit;
+  int window;
   char *certificate;
   char *privatekey;
   char *password;
@@ -57,6 +58,7 @@ static void usage(int rc)
   printf("-a    \tAddress to listen on [amqp://~0.0.0.0]\n");
   printf("-c    \tNumber of messages to receive [0=forever]\n");
   printf("-r    \t# messages per call to recv [2048]\n");
+  printf("-w    \tSize for incoming window\n");
   printf("-C    \tPath to the certificate file.\n");
   printf("-K    \tPath to the private key file.\n");
   printf("-P    \tPassword for the private key.\n");
@@ -72,7 +74,7 @@ static void parse_options( int argc, char **argv, options_t *opts )
   opts->address = "amqp://~0.0.0.0";
   opts->credit = 2048;
 
-  while((c = getopt(argc, argv, "ha:c:r:C:K:P:")) != -1)
+  while((c = getopt(argc, argv, "ha:c:r:w:C:K:P:")) != -1)
   {
     switch(c)
     {
@@ -85,6 +87,12 @@ static void parse_options( int argc, char **argv, options_t *opts )
       break;
     case 'r':
       if (sscanf( optarg, "%d", &opts->credit ) != 1) {
+        fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
+        usage(1);
+      }
+      break;
+    case 'w':
+      if (sscanf( optarg, "%d", &opts->window ) != 1) {
         fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
         usage(1);
       }
@@ -136,10 +144,10 @@ int main(int argc, char** argv)
     pn_messenger_set_password(messenger, opts.password);
   }
 
-  // RAFI: seems to cause receiver to hang:
-  //if (window) {
-  //pn_messenger_set_incoming_window( messenger, window );
-  //}
+  if (opts.window) {
+    // RAFI: seems to cause receiver to hang:
+    pn_messenger_set_incoming_window( messenger, opts.window );
+  }
 
   pn_messenger_start(messenger);
   check(messenger);

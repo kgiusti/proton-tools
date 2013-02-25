@@ -48,6 +48,7 @@ typedef struct options_t {
   uint32_t msg_size;
   uint32_t add_headers;
   uint32_t put_count;
+  int   window;
 } options_t;
 
 static void usage(int rc)
@@ -58,6 +59,7 @@ static void usage(int rc)
   printf("-s     \tSize of message body in bytes [1024]\n");
   printf("-p     \t*TODO* Add N sample properties to each message [3]\n");
   printf("-b     \t# messages to put before calling send [1024]\n");
+  printf("-w    \tSize for outgoing window\n");
   exit(rc);
 }
 
@@ -73,7 +75,7 @@ static void parse_options( int argc, char **argv, options_t *opts )
   opts->add_headers = 3;
   opts->put_count = 1024;
 
-  while((c = getopt(argc, argv, "a:c:s:p:b:")) != -1) {
+  while((c = getopt(argc, argv, "a:c:s:p:b:w:")) != -1) {
     switch(c) {
     case 'a': opts->address = optarg; break;
     case 'c':
@@ -95,6 +97,12 @@ static void parse_options( int argc, char **argv, options_t *opts )
       }
     case 'b':
       if (sscanf( optarg, "%u", &opts->put_count ) != 1) {
+        fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
+        usage(1);
+      }
+      break;
+    case 'w':
+      if (sscanf( optarg, "%d", &opts->window ) != 1) {
         fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
         usage(1);
       }
@@ -146,9 +154,9 @@ int main(int argc, char** argv)
 
 
   messenger = pn_messenger( argv[0] );
-  //  if (opts.window) {
-  //    pn_messenger_set_outgoing_window( messenger, opts.window );
-  //  }
+  if (opts.window) {
+    pn_messenger_set_outgoing_window( messenger, opts.window );
+  }
   pn_messenger_start(messenger);
 
   pn_timestamp_t start = pn_i_now();
