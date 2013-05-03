@@ -68,16 +68,51 @@ static void parse_options( int argc, char **argv, Options_t *opts )
 }
 
 
+static void build_reply_message( pn_message_t *message, const char *command,
+                                const char *status, const char *value )
+{
+    pn_data_t *body = pn_message_body(message);
+    pn_data_clear( body );
+    int rc = pn_data_fill( body, "{SSSSSSSS}",
+                           "type", "response",
+                           "command", command,
+                           "value", value,
+                           "status", status );
+    check( rc == 0, "Failure to create response message" );
+}
+
+
 static int process_message( pn_messenger_t *messenger,
                             pn_message_t *message )
 {
-    // pull out the type of message
+    int rc;
+    pn_data_t *body = pn_message_body(message);
+    pn_bytes_t m_type;
+    pn_bytes_t m_command;
+    pn_bytes_t m_value;
+    pn_bytes_t m_status;
 
-    // pull out the command
-
-    // if set, pull out the new message, set fortune, set status
-    // else if get, copy in current fortune
-    // else status == ERROR
+    rc = pn_data_scan( body, "{.S.S.S.S}",
+                       &m_type, &m_command, &m_value, &m_status );
+    check( rc == 0, "Failed to decode response message" );
+    if (strncmp("request", m_type.start, m_type.size)) {
+        LOG("Unknown message type received: %.*s\n", (int)m_type.size, m_type.start );
+        // should try to reply with error status, for now I punt
+        return 0;
+    }
+    if (strncmp("get", m_command.start, m_command.size) == 0) {
+        LOG("Received GET request\n");
+        build_reply_message( message, "get", "OK", fortune );
+    } else {  // assume set
+        char *new_fortune = (char *) malloc(sizeof(char) * (m_value.size + 1));
+        check( new_fortune, "Out of memory" );
+        memcpy( new_fortune, m_value.start, m_value.size );
+        new_fortune[m_value.size] = 0;
+        LOG("Received SET request (%s)\n", new_fortune);
+        free( fortune );
+        fortune = new_fortune;
+        build_reply_message( message, "set", "OK", fortune );
+    }
 
     const char *reply_addr = pn_message_get_reply_to( message );
     if (reply_addr) {
@@ -104,7 +139,7 @@ int main(int argc, char** argv)
     parse_options( argc, argv, &opts );
 
     message = pn_message();
-    messenger = pn_messenger( argv[0] );
+    messenger = pn_messenger( 0 );
 
     pn_messenger_start(messenger);
     check_messenger(messenger);
