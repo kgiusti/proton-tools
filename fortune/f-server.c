@@ -116,7 +116,6 @@ static int process_message( pn_messenger_t *messenger,
 
     const char *reply_addr = pn_message_get_reply_to( message );
     if (reply_addr) {
-        LOG("Replying to: %s\n", reply_addr );
         pn_message_set_address( message, reply_addr );
         pn_message_set_creation_time( message, msgr_now() );
         return 1;

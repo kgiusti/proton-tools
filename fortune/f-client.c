@@ -35,6 +35,7 @@ typedef struct {
     const char *gateway_addr;
     const char *new_message;
     int timeout;  // seconds
+    const char *reply_to;
 } Options_t;
 
 static int log = 0;
@@ -48,7 +49,9 @@ static void usage(int rc)
            " -a <f-server> \tThe address of the fortune server [amqp://0.0.0.0]\n"
            " -s <message> \tSet the server's fortune message to \"<message>\"\n"
            " -g <gateway> \tGateway to use to reach <f-server>\n"
+           " -r <address> \tUse <address> for reply-to\n"
            " -t # \tInactivity timeout in seconds, -1 = no timeout [-1]\n"
+           " -V \tEnable debug logging\n"
            );
     exit(rc);
 }
@@ -61,7 +64,7 @@ static void parse_options( int argc, char **argv, Options_t *opts )
     memset( opts, 0, sizeof(*opts) );
     opts->timeout = -1;
 
-    while ((c = getopt(argc, argv, "a:s:g:t:V")) != -1) {
+    while ((c = getopt(argc, argv, "a:s:g:t:r:V")) != -1) {
         switch (c) {
         case 'a': opts->address = optarg; break;
         case 's': opts->new_message = optarg; break;
@@ -73,6 +76,7 @@ static void parse_options( int argc, char **argv, Options_t *opts )
             }
             if (opts->timeout > 0) opts->timeout *= 1000;
         case 'V': log = 1; break;
+        case 'r': opts->reply_to = optarg; break;
 
         default:
             usage(1);
@@ -200,6 +204,21 @@ int main(int argc, char** argv)
     pn_messenger_set_timeout( messenger, opts.timeout );
     pn_messenger_start(messenger);
 
+    char *reply_to = NULL;
+    if (opts.reply_to) {
+        LOG("subscribing to %s for replies\n", opts.reply_to);
+        pn_messenger_subscribe(messenger, opts.reply_to);
+        reply_to = msgr_strdup(opts.reply_to);
+        check( reply_to, "Out of memory" );
+        // need to 'fix' the reply-to for use in the message itself:
+        // no '~' is allowed in that case
+        char *tilde = strstr( reply_to, "://~" );
+        if (tilde) {
+            tilde += 3;  // overwrite '~'
+            memmove( tilde, tilde + 1, strlen( tilde + 1 ) + 1 );
+        }
+    }
+
     if (opts.new_message) {
         message = build_set_message( opts.new_message );
     } else {
@@ -213,6 +232,11 @@ int main(int argc, char** argv)
     pn_message_set_correlation_id( message, id );
     //pn_message_set_creation_time( message, msgr_now() );
     pn_message_set_address( message, opts.address );
+    if (reply_to) {
+        LOG("setting reply-to %s\n", reply_to);
+        rc = pn_message_set_reply_to( message, reply_to );
+        check(rc == 0, "pn_message_set_reply_to() failed");
+    }
     pn_messenger_put(messenger, message);
     LOG("sending request...\n");
     rc = pn_messenger_recv(messenger, -1);
@@ -236,6 +260,8 @@ int main(int argc, char** argv)
 
     pn_messenger_free(messenger);
     pn_message_free(message);
+
+    if (reply_to) free(reply_to);
 
     return 0;
 }
