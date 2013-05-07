@@ -36,6 +36,7 @@ typedef struct {
     const char *new_message;
     int timeout;  // seconds
     const char *reply_to;
+    int reject;
 } Options_t;
 
 static int log = 0;
@@ -52,6 +53,7 @@ static void usage(int rc)
            " -r <address> \tUse <address> for reply-to\n"
            " -t # \tInactivity timeout in seconds, -1 = no timeout [-1]\n"
            " -V \tEnable debug logging\n"
+           " -X \tSend a bad message (forces a REJECT from f-server\n"
            );
     exit(rc);
 }
@@ -64,7 +66,7 @@ static void parse_options( int argc, char **argv, Options_t *opts )
     memset( opts, 0, sizeof(*opts) );
     opts->timeout = -1;
 
-    while ((c = getopt(argc, argv, "a:s:g:t:r:V")) != -1) {
+    while ((c = getopt(argc, argv, "a:s:g:t:r:VX")) != -1) {
         switch (c) {
         case 'a': opts->address = optarg; break;
         case 's': opts->new_message = optarg; break;
@@ -75,8 +77,10 @@ static void parse_options( int argc, char **argv, Options_t *opts )
                 usage(1);
             }
             if (opts->timeout > 0) opts->timeout *= 1000;
-        case 'V': log = 1; break;
+            break;
         case 'r': opts->reply_to = optarg; break;
+        case 'V': log = 1; break;
+        case 'X': opts->reject = 1; break;
 
         default:
             usage(1);
@@ -96,7 +100,6 @@ static void process_reply( pn_messenger_t *messenger,
     pn_bytes_t m_command;
     pn_bytes_t m_value;
     pn_bytes_t m_status;
-    // {"type":"response", "status":<string>}  string=="OK" on success
     rc = pn_data_scan( body, "{.S.S.S.S}",
                        &m_type, &m_command, &m_value, &m_status );
     check( rc == 0, "Failed to decode response message" );
@@ -113,6 +116,12 @@ static void process_reply( pn_messenger_t *messenger,
 }
 
 
+/* set request message format:
+   { "type": "request",
+     "command": "set",
+     "value": <new fortune string>,
+   }
+*/
 static pn_message_t *build_set_message( const char *new_message )
 {
     int rc;
@@ -122,16 +131,21 @@ static pn_message_t *build_set_message( const char *new_message )
 
     pn_data_t *body = pn_message_body(message);
     pn_data_clear( body );
-    rc = pn_data_fill( body, "{SSSSSSSS}",
+    rc = pn_data_fill( body, "{SSSSSS}",
                        "type", "request",
                        "command", "set",
-                       "value", new_message,
-                       "", "");
+                       "value", new_message );
     check( rc == 0, "Failure to create set message" );
     return message;
 }
 
 
+/* get request message format:
+   { "type": "request",
+     "command": "set",
+     "value":"",
+   }
+*/
 static pn_message_t *build_get_message( void )
 {
     int rc;
@@ -141,52 +155,13 @@ static pn_message_t *build_get_message( void )
 
     pn_data_t *body = pn_message_body(message);
     pn_data_clear( body );
-    rc = pn_data_fill( body, "{SSSSSSSS}",
+    rc = pn_data_fill( body, "{SSSSSS}",
                        "type", "request",
                        "command", "get",
-                       "", "",
-                       "", "" );
+                       "value", "" );
     check( rc == 0, "Failure to create get message" );
     return message;
 }
-
-
-/*
-  type: request|response
-  command: get|set
-  value:
-  status:
-
-  get request:
-
-  type: request
-  command: get
-  value: IGNORED
-  status: IGNORED
-
-  get response
-
-  type: response
-  command: get
-  value:  <string> if OK
-  status: "OK" or error
-
-
-  set request
-
-  type: request
-  command: set
-  value: new fortune
-  status <ignored>
-
-  set response
-
-  type: response
-  command: set
-  value: set fortune
-  status: "OK" or error
-  
-*/
 
 
 int main(int argc, char** argv)
@@ -200,7 +175,11 @@ int main(int argc, char** argv)
     parse_options( argc, argv, &opts );
 
     messenger = pn_messenger( 0 );
+    check( messenger, "Failed to allocate a Messenger");
 
+    // only 1 message (request/response) outstanding at a time
+    pn_messenger_set_outgoing_window( messenger, 1 );
+    pn_messenger_set_incoming_window( messenger, 1 );
     pn_messenger_set_timeout( messenger, opts.timeout );
     pn_messenger_start(messenger);
 
@@ -219,7 +198,10 @@ int main(int argc, char** argv)
         }
     }
 
-    if (opts.new_message) {
+    if (opts.reject) {
+        // empty test message that forces a reject from the server
+        message = pn_message();
+    } else if (opts.new_message) {
         message = build_set_message( opts.new_message );
     } else {
         message = build_get_message( );
@@ -238,19 +220,42 @@ int main(int argc, char** argv)
         check(rc == 0, "pn_message_set_reply_to() failed");
     }
     pn_messenger_put(messenger, message);
+    pn_tracker_t request_tracker = pn_messenger_outgoing_tracker(messenger);
+    // TODO: how can I tell if this succeeded???
+
     LOG("sending request...\n");
-    rc = pn_messenger_recv(messenger, -1);
-    //check_messenger(messenger);
-    check(rc == 0, "pn_messenger_recv() failed");
+    rc = pn_messenger_send(messenger);
+    check(rc == 0, "pn_messenger_send() failed");
+
+    pn_status_t status = pn_messenger_status( messenger, request_tracker );
+    switch (status) {
+    case PN_STATUS_ACCEPTED:
+        LOG("Request message accepted by remote.\n");
+        break;
+    case PN_STATUS_REJECTED:
+        fprintf(stderr, "Request rejected by remote, exiting\n");
+        check( false, "done!");
+    default:
+        // TODO: retry on failure
+        fprintf(stderr, "Unexpected request status: %d\n", (int) status);
+        check( false, "done!" );
+    }
+
+    rc = pn_messenger_settle( messenger, request_tracker, 0 );
+    check(rc == 0, "pn_messenger_settle() failed");
+
+    LOG("waiting for response...\n");
+    rc = pn_messenger_recv(messenger, 1);
+    check(rc == 0, "pn_messenger_recv() failed");   // TODO: deal with timeout
     rc = pn_messenger_get(messenger, message);
     check(rc == 0, "pn_messenger_get() failed");
     LOG("response received!\n");
-
-    // type == response and status == "OK"
-    // if command == get
-    //    print message
-    // else if command == set
-    //    print message set to "message"
+    pn_tracker_t response_tracker = pn_messenger_incoming_tracker(messenger);
+    rc = pn_messenger_accept( messenger, response_tracker, 0 );
+    check(rc == 0, "pn_messenger_accept() failed");
+    rc = pn_messenger_settle( messenger, response_tracker, 0 );
+    check(rc == 0, "pn_messenger_settle() failed");
+    LOG("response accepted!\n");
 
     process_reply( messenger, message);
 

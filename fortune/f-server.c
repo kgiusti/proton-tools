@@ -27,9 +27,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <unistd.h>
 
 typedef struct {
     const char *address;
+    unsigned int delay;
 } Options_t;
 
 static int log = 0;
@@ -42,6 +44,7 @@ static void usage(int rc)
 {
     printf("Usage: f-server [OPTIONS] \n"
            " -a <addr> \tAddress to listen on [amqp://~0.0.0.0]\n"
+           " -d <seconds> \tDelay <seconds> before replying [0]\n"
            " -V \tEnable debug logging\n"
            );
     exit(rc);
@@ -54,9 +57,15 @@ static void parse_options( int argc, char **argv, Options_t *opts )
 
     memset( opts, 0, sizeof(*opts) );
 
-    while ((c = getopt(argc, argv, "a:V")) != -1) {
+    while ((c = getopt(argc, argv, "a:d:V")) != -1) {
         switch (c) {
         case 'a': opts->address = optarg; break;
+        case 'd':
+            if (sscanf( optarg, "%u", &opts->delay ) != 1) {
+                fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
+                usage(1);
+            }
+            break;
         case 'V': log = 1; break;
 
         default:
@@ -68,6 +77,14 @@ static void parse_options( int argc, char **argv, Options_t *opts )
 }
 
 
+
+/* Reply message format:
+   { "type": "response",
+     "command": ["get" | "set"],
+     "value": <fortune string>,
+     "status": ["OK"|<error string>]
+   }
+*/
 static void build_reply_message( pn_message_t *message, const char *command,
                                 const char *status, const char *value )
 {
@@ -81,7 +98,8 @@ static void build_reply_message( pn_message_t *message, const char *command,
     check( rc == 0, "Failure to create response message" );
 }
 
-
+// perform the operation requested by the message, re-write the
+// message to form the reply.  returns 0 on success, else error
 static int process_message( pn_messenger_t *messenger,
                             pn_message_t *message )
 {
@@ -90,20 +108,23 @@ static int process_message( pn_messenger_t *messenger,
     pn_bytes_t m_type;
     pn_bytes_t m_command;
     pn_bytes_t m_value;
-    pn_bytes_t m_status;
 
-    rc = pn_data_scan( body, "{.S.S.S.S}",
-                       &m_type, &m_command, &m_value, &m_status );
-    check( rc == 0, "Failed to decode response message" );
+    rc = pn_data_scan( body, "{.S.S.S}",
+                       &m_type, &m_command, &m_value );
+    if (rc) {
+        LOG( "Failed to decode request message" );
+        return -1;
+    }
+
     if (strncmp("request", m_type.start, m_type.size)) {
         LOG("Unknown message type received: %.*s\n", (int)m_type.size, m_type.start );
-        // should try to reply with error status, for now I punt
-        return 0;
+        return -1;
     }
+
     if (strncmp("get", m_command.start, m_command.size) == 0) {
         LOG("Received GET request\n");
         build_reply_message( message, "get", "OK", fortune );
-    } else {  // assume set
+    } else if (strncmp("set", m_command.start, m_command.size) == 0) {
         char *new_fortune = (char *) malloc(sizeof(char) * (m_value.size + 1));
         check( new_fortune, "Out of memory" );
         memcpy( new_fortune, m_value.start, m_value.size );
@@ -112,15 +133,11 @@ static int process_message( pn_messenger_t *messenger,
         free( fortune );
         fortune = new_fortune;
         build_reply_message( message, "set", "OK", fortune );
+    } else {
+        LOG("Unknown command received: %.*s\n", (int)m_command.size, m_command.start );
+        return -1;
     }
-
-    const char *reply_addr = pn_message_get_reply_to( message );
-    if (reply_addr) {
-        pn_message_set_address( message, reply_addr );
-        pn_message_set_creation_time( message, msgr_now() );
-        return 1;
-    }
-    return 0;  // don't reply
+    return 0;
 }
 
 
@@ -140,6 +157,9 @@ int main(int argc, char** argv)
     message = pn_message();
     messenger = pn_messenger( 0 );
 
+    // only 1 message (request/response) outstanding at a time
+    pn_messenger_set_outgoing_window( messenger, 1 );
+    pn_messenger_set_incoming_window( messenger, 1 );
     pn_messenger_start(messenger);
     check_messenger(messenger);
 
@@ -150,17 +170,33 @@ int main(int argc, char** argv)
     for (;;) {
 
         LOG("Calling pn_messenger_recv(%d)\n", -1);
-        rc = pn_messenger_recv(messenger, -1);
+        rc = pn_messenger_recv(messenger, 1);
         check(rc == 0, "pn_messenger_recv() failed");
 
         LOG("Messages on incoming queue: %d\n", pn_messenger_incoming(messenger));
         while (pn_messenger_incoming(messenger)) {
             rc = pn_messenger_get(messenger, message);
             check(rc == 0, "pn_messenger_get() failed");
-            if (process_message( messenger, message )) {
-                LOG("Replying to: %s\n", pn_message_get_address(message) );
-                rc = pn_messenger_put(messenger, message);
-                check(rc == 0, "pn_messenger_put() failed");
+            pn_tracker_t request_tracker = pn_messenger_incoming_tracker(messenger);
+            if (process_message( messenger, message ) != 0) {
+                LOG("Invalid message received - rejecting\n");
+                rc = pn_messenger_reject(messenger, request_tracker, 0 );
+                check( rc == 0, "pn_messenger_reject() failed");
+            } else {
+                LOG("Accepting received message.\n");
+                rc = pn_messenger_accept(messenger, request_tracker, 0 );
+                check( rc == 0, "pn_messenger_accept() failed");
+
+                if (opts.delay) sleep( opts.delay );
+
+                const char *reply_addr = pn_message_get_reply_to( message );
+                if (reply_addr) {
+                    LOG("Replying to: %s\n", reply_addr );
+                    pn_message_set_address( message, reply_addr );
+                    pn_message_set_creation_time( message, msgr_now() );
+                    rc = pn_messenger_put(messenger, message);
+                    check(rc == 0, "pn_messenger_put() failed");
+                }
             }
         }
     }
