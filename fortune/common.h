@@ -20,6 +20,10 @@
 
 #include "proton/types.h"
 #include "proton/message.h"
+#include "proton/messenger.h"
+
+void enable_logging();
+void LOG( const char *fmt, ... );
 
 void msgr_die(const char *file, int line, const char *message);
 char *msgr_strdup( const char *src );
@@ -31,6 +35,18 @@ void parse_password( const char *, char ** );
 
 #define check( expression, message )  \
   { if (!(expression)) msgr_die(__FILE__,__LINE__, message); }
+
+typedef enum {
+    STATUS_FAILED,      // unknown if message was delivered
+    STATUS_ACCEPTED,    // delivered and accepted by receiver
+    STATUS_REJECTED     // delivered and rejected by receiver
+} DeliveryStatus_t;
+
+DeliveryStatus_t deliver_message( pn_messenger_t *messenger,
+                                  pn_message_t *message,
+                                  unsigned int retries,
+                                  int timeout_msecs,
+                                  int backoff_secs);
 
 
 #if defined(_WIN32) && ! defined(__CYGWIN__)

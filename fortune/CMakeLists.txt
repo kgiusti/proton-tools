@@ -52,8 +52,8 @@ set (CMAKE_BUILD_TYPE RelWithDebInfo)
 add_executable(f-client f-client.c common.c)
 add_executable(f-server f-server.c common.c)
 
-target_link_libraries(f-client ${PROTON_LIB})
-target_link_libraries(f-server ${PROTON_LIB})
+target_link_libraries(f-client uuid ${PROTON_LIB})
+target_link_libraries(f-server uuid ${PROTON_LIB})
 
 set_target_properties (
   f-client f-server
