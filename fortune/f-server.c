@@ -271,6 +271,8 @@ int main(int argc, char** argv)
     fortune = msgr_strdup("You killed Kenny!");
     check( fortune, "Out of memory" );
 
+    init_deduplication_db();
+
     parse_options( argc, argv, &opts );
 
     // only 1 message (request/response) outstanding at a time
