@@ -49,7 +49,7 @@ if (CMAKE_COMPILER_IS_GNUCC)
   if (ENABLE_WARNING_ERROR)
     set (WERROR "-Werror")
   endif (ENABLE_WARNING_ERROR)
-  set (COMPILE_WARNING_FLAGS "${WERROR} -Wall -pedantic-errors")
+  set (COMPILE_WARNING_FLAGS "${WERROR} -Wall -pedantic-errors -Wno-comment")
   set (COMPILE_LANGUAGE_FLAGS "-std=c99")
 endif (CMAKE_COMPILER_IS_GNUCC)
 
@@ -61,8 +61,8 @@ add_executable(f-server f-server.c common.c)
 target_link_libraries(f-client ${PROTON_LIB} ${GLIB2_LIBRARIES} ${UUID_LIBRARIES})
 target_link_libraries(f-server ${PROTON_LIB} ${GLIB2_LIBRARIES} ${UUID_LIBRARIES})
 
-set_target_properties (
-  f-client f-server
+set_source_files_properties (
+  f-client f-server common
   PROPERTIES
   COMPILE_FLAGS "${COMPILE_WARNING_FLAGS} ${COMPILE_LANGUAGE_FLAGS}"
 )

@@ -33,11 +33,12 @@
 
 typedef struct {
     const char *address;
+    const char *gateway_addr;
     unsigned int delay;
     unsigned int duration;      // for duplication detection
     unsigned int retry;
     unsigned int backoff;
-    int timeout;  // seconds
+    int send_timeout;  // seconds
 } Options_t;
 
 static char *fortune;
@@ -51,11 +52,12 @@ static void usage(int rc)
 {
     printf("Usage: f-server [OPTIONS] \n"
            " -a <addr> \tAddress to listen on [amqp://~0.0.0.0]\n"
+           " -g <gateway> \tGateway for sending all reply messages\n"
            " -d <seconds> \tDelay <seconds> before processing and replying [0]\n"
-           " -t # \tResponse timeout in seconds, -1 = no timeout [-1]\n"
+           " -t # \tResponse send timeout in seconds [3]\n"
            " -l <seconds> \tDefault duration for saving received messages [60]\n"
-           " -R # \tMessage send retry limit [10]\n"
-           " -B <secs> \tRetry backoff timeout [5]\n"
+           " -R # \tMessage send retry limit [0]\n"
+           " -B <secs> \tSend retry backoff timeout [5]\n"
            " -V \tEnable debug logging\n"
            );
     exit(rc);
@@ -68,13 +70,13 @@ static void parse_options( int argc, char **argv, Options_t *opts )
 
     memset( opts, 0, sizeof(*opts) );
     opts->duration = 60;
-    opts->timeout = -1;
-    opts->retry = 10;
+    opts->send_timeout = 3;
     opts->backoff = 5;
 
-    while ((c = getopt(argc, argv, "a:d:l:t:R:B:V")) != -1) {
+    while ((c = getopt(argc, argv, "a:g:d:l:t:R:B:V")) != -1) {
         switch (c) {
         case 'a': opts->address = optarg; break;
+        case 'g': opts->gateway_addr = optarg; break;
         case 'd':
             if (sscanf( optarg, "%u", &opts->delay ) != 1) {
                 fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
@@ -88,11 +90,10 @@ static void parse_options( int argc, char **argv, Options_t *opts )
             }
             break;
         case 't':
-            if (sscanf( optarg, "%d", &opts->timeout ) != 1) {
+            if (sscanf( optarg, "%d", &opts->send_timeout ) != 1) {
                 fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
                 usage(1);
             }
-            if (opts->timeout > 0) opts->timeout *= 1000;
             break;
         case 'R':
             if (sscanf( optarg, "%u", &opts->retry ) != 1) {
@@ -114,6 +115,7 @@ static void parse_options( int argc, char **argv, Options_t *opts )
     }
 
     if (!opts->address) opts->address = "amqp://~0.0.0.0";
+    if (opts->send_timeout > 0) opts->send_timeout *= 1000;
 }
 
 
@@ -231,8 +233,10 @@ static void remember_request( pn_message_t *message, pn_timestamp_t expire )
     }
 }
 
+
 // has message already been seen?
-static bool is_duplicate( pn_message_t *message )
+//
+static bool is_duplicate( pn_message_t *message, pn_timestamp_t refresh )
 {
     pn_atom_t id = pn_message_get_id( message );
     if (id.type != PN_UUID) {
@@ -245,14 +249,41 @@ static bool is_duplicate( pn_message_t *message )
     uuid_unparse_upper( *(uuid_t *)&id.u.as_uuid.bytes, tmp );
 
     DeDuplicateNode_t *n = (DeDuplicateNode_t *) g_hash_table_lookup( deduplication_db, tmp );
-    if (n && n->expire <= msgr_now()) {
-        LOG( "expiring old message from deduplication database\n" );
-        g_hash_table_remove( deduplication_db, n->id );
-        free( n );
-        n = NULL;
+    if (n) {
+        if (n->expire <= msgr_now()) {
+            LOG( "expiring old message from deduplication database: %s\n", tmp );
+            g_hash_table_remove( deduplication_db, n->id );
+            free( n );
+            n = NULL;
+        } else {
+            n->expire = refresh;
+        }
     }
 
     return n != NULL;
+}
+
+
+// remove the message from the deduplication database
+//
+static void forget_request( pn_message_t *message )
+{
+    pn_atom_t id = pn_message_get_id( message );
+    if (id.type != PN_UUID) {
+        fprintf(stderr, "Unexpected message id received: %d\n",
+                (int) id.type);
+        return;
+    }
+
+    char tmp[37];
+    uuid_unparse_upper( *(uuid_t *)&id.u.as_uuid.bytes, tmp );
+
+    DeDuplicateNode_t *n = (DeDuplicateNode_t *) g_hash_table_lookup( deduplication_db, tmp );
+    if (n) {
+        LOG( "removing old message from deduplication database: %s\n", tmp );
+        g_hash_table_remove( deduplication_db, n->id );
+        free( n );
+    }
 }
 
 
@@ -278,7 +309,16 @@ int main(int argc, char** argv)
     // only 1 message (request/response) outstanding at a time
     pn_messenger_set_outgoing_window( messenger, 1 );
     pn_messenger_set_incoming_window( messenger, 1 );
+
     pn_messenger_set_timeout( messenger, -1 );
+
+    if (opts.gateway_addr) {
+        LOG( "routing all messages via %s\n", opts.gateway_addr );
+        rc = pn_messenger_route( messenger,
+                                 "*", opts.gateway_addr );
+        check( rc == 0, "pn_messenger_route() failed" );
+    }
+
     pn_messenger_start(messenger);
 
     LOG("Subscribing to '%s'\n", opts.address);
@@ -305,6 +345,7 @@ int main(int argc, char** argv)
             // decode the message
             command_t command = GET_COMMAND;
             char *new_fortune = NULL;
+            bool send_reply = false;
             rc = decode_request( request_msg, &command, &new_fortune );
             if (rc) {
                 LOG("Invalid message received - rejecting\n");
@@ -314,13 +355,14 @@ int main(int argc, char** argv)
                 LOG("Message is valid, accepting it.\n");
                 rc = pn_messenger_accept(messenger, request_tracker, 0 );
                 check( rc == 0, "pn_messenger_accept() failed");
+                send_reply = true;
             }
 
             // before processing it, check for a duplicate
             bool duplicate = false;
             if (pn_message_get_delivery_count( request_msg ) != 0) {
                 LOG("Received retransmitted message\n");
-                if (is_duplicate( request_msg )) {
+                if (is_duplicate( request_msg, msgr_now() + opts.duration * 1000 )) {
                     LOG("Duplicate found, skipping command.\n");
                     duplicate = true;
                 }
@@ -331,38 +373,44 @@ int main(int argc, char** argv)
                 fortune = new_fortune;
             }
 
-            remember_request( request_msg, msgr_now() + opts.duration * 1000 );
-
             // BEGIN HACK: before we can settle, we need to wait for
             // the sender to settle first.  See amqp-1.0 spec -
             // exactly once delivery
             LOG("waiting for sender to settle the request...\n");
-            pn_messenger_set_timeout( messenger, 0 );
+            pn_messenger_set_timeout( messenger, 500 );
             pn_messenger_recv( messenger, -1 );
             pn_messenger_set_timeout( messenger, -1 );
+            // END HACK
             if (pn_messenger_status( messenger, request_tracker) != PN_STATUS_ACCEPTED) {
                 fprintf(stderr, "Remote did not settle as expected! %d\n",
                         (int)pn_messenger_status( messenger, request_tracker));
+
+                // since we don't know if the remote ever got our
+                // outcome, remember this message in case the sender
+                // re-transmits it
+                remember_request( request_msg, msgr_now() + opts.duration * 1000 );
+            } else if (duplicate) {
+                forget_request( request_msg );
             }
-            // END HACK
 
             LOG("settling the request locally...\n");
             rc = pn_messenger_settle( messenger, request_tracker, 0 );
             check(rc == 0, "pn_messenger_settle() failed");
 
-            //
-            // Send reponse
-            //
+            if (send_reply) {
+                //
+                // Send reponse
+                //
+                const char *reply_addr = pn_message_get_reply_to( request_msg );
+                if (reply_addr) {
+                    build_response_message( response_msg, reply_addr, command, "OK", fortune );
 
-            const char *reply_addr = pn_message_get_reply_to( request_msg );
-            if (reply_addr) {
-                build_response_message( response_msg, reply_addr, command, "OK", fortune );
-
-                DeliveryStatus_t ds = deliver_message( messenger,
-                                                       response_msg,
-                                                       opts.retry, opts.timeout, opts.backoff );
-                if (ds != STATUS_ACCEPTED) {
-                    fprintf( stderr, "Send of response failed - retries exhausted." );
+                    DeliveryStatus_t ds = deliver_message( messenger,
+                                                           response_msg,
+                                                           opts.retry, opts.send_timeout, opts.backoff );
+                    if (ds != STATUS_ACCEPTED) {
+                        fprintf( stderr, "Send of response failed - retries exhausted.\n" );
+                    }
                 }
             }
         }

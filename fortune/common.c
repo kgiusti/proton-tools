@@ -87,7 +87,7 @@ DeliveryStatus_t deliver_message( pn_messenger_t *messenger,
     int old_timeout = pn_messenger_get_timeout( messenger );
     pn_messenger_set_timeout( messenger, timeout_msecs );
     bool done = false;
-    while (!done && retries) {
+    do {
         pn_messenger_put( messenger, message );
         pn_tracker_t request_tracker = pn_messenger_outgoing_tracker(messenger);
 
@@ -112,18 +112,18 @@ DeliveryStatus_t deliver_message( pn_messenger_t *messenger,
             done = true;
         } else {
             fprintf(stderr, "Unexpected status from peer: %d\n", (int) status);
-            LOG("settling locally...\n");
+            LOG("settling locally anyways...\n");
             rc = pn_messenger_settle( messenger, request_tracker, 0 );
             check(rc == 0, "pn_messenger_settle() failed");
 
             pn_message_set_delivery_count( message,
                                            pn_message_get_delivery_count( message ) + 1 );
 
-            if (backoff_secs) sleep( backoff_secs );
-            --retries;
             if (retries) LOG("Resending...\n");
+            if (backoff_secs) sleep( backoff_secs );
         }
-    }
+    } while (!done && retries--);
+
 
     // BEGIN HACK: at this point, the fact that we called "settle"
     // hasn't been communicated to the peer.  The peer (receiver) will
@@ -134,10 +134,9 @@ DeliveryStatus_t deliver_message( pn_messenger_t *messenger,
     // pn_messenger_send/recv() again?
     //
     if (result != STATUS_FAILED) {
-        pn_messenger_set_timeout( messenger, 0 );
+        pn_messenger_set_timeout( messenger, 500 );
         pn_messenger_recv( messenger, -1 );
     }
-    // ? How can I confirm the remote settled (already have outcome) ?
     // end HACK
 
     pn_messenger_set_timeout( messenger, old_timeout );

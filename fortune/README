@@ -22,3 +22,8 @@ And in a different shell, run the client:
 
 ./f-client -a amqp://0.0.0.0
 
+
+## Running with dispatch-router
+
+./f-server -a amqp://0.0.0.0:5672/SERVER
+./f-client -a amqp://0.0.0.0:5672/SERVER -r amqp://0.0.0.0:5672/CLIENT

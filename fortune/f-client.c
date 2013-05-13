@@ -51,7 +51,7 @@ static void usage(int rc)
            " -s <message> \tSet the server's fortune message to \"<message>\"\n"
            " -g <gateway> \tGateway to use to reach <f-server>\n"
            " -r <address> \tUse <address> for reply-to\n"
-           " -t # \tResponse timeout in seconds, -1 = no timeout [-1]\n"
+           " -t # \tTimeout in seconds [1]\n"
            " -l <secs> \tTTL to set in message, 0 = no TTL [0]\n"
            " -R # \tMessage send retry limit [10]\n"
            " -B <secs> \tRetry backoff timeout [5]\n"
@@ -67,8 +67,8 @@ static void parse_options( int argc, char **argv, Options_t *opts )
     opterr = 0;
 
     memset( opts, 0, sizeof(*opts) );
-    opts->timeout = -1;
-    opts->retry = 10;
+    opts->timeout = 1;
+    opts->retry = 3;
     opts->backoff = 5;
 
     while ((c = getopt(argc, argv, "a:s:g:t:r:l:R:B:VX")) != -1) {
@@ -81,7 +81,6 @@ static void parse_options( int argc, char **argv, Options_t *opts )
                 fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
                 usage(1);
             }
-            if (opts->timeout > 0) opts->timeout *= 1000;
             break;
         case 'r': opts->reply_to = optarg; break;
         case 'l':
@@ -111,6 +110,7 @@ static void parse_options( int argc, char **argv, Options_t *opts )
     }
 
     if (!opts->address) opts->address = "amqp://0.0.0.0";
+    if (opts->timeout > 0) opts->timeout *= 1000;
 }
 
 
@@ -195,6 +195,14 @@ int main(int argc, char** argv)
     // only 1 message (request/response) outstanding at a time
     pn_messenger_set_outgoing_window( messenger, 1 );
     pn_messenger_set_incoming_window( messenger, 1 );
+
+    if (opts.gateway_addr) {
+        LOG( "routing all messages via %s\n", opts.gateway_addr );
+        rc = pn_messenger_route( messenger,
+                                 "*", opts.gateway_addr );
+        check( rc == 0, "pn_messenger_route() failed" );
+    }
+
     pn_messenger_start(messenger);
 
     char *reply_to = NULL;
@@ -214,18 +222,23 @@ int main(int argc, char** argv)
 
     // Create a request message
     //
-    if (!opts.reject)
-        build_request_message( request_msg,
-                               opts.new_fortune ? "set" : "get",
-                               opts.address, reply_to,
-                               opts.new_fortune, opts.ttl );
+    const char *command = opts.new_fortune ? "set" : "get";
+    build_request_message( request_msg,
+                           opts.reject ? "bad-command" : command,
+                           opts.address, reply_to,
+                           opts.new_fortune, opts.ttl );
 
     DeliveryStatus_t ds = deliver_message( messenger, request_msg,
                                            opts.retry, opts.timeout, opts.backoff );
-    check( ds == STATUS_ACCEPTED, "Send failed - retries exhausted." );
+    if (ds == STATUS_REJECTED) {
+        fprintf( stderr, "Remote rejected the request - exiting." );
+        exit(1);
+    } else if (ds != STATUS_ACCEPTED) {
+        LOG("Remote may not have received the request!  Waiting for reply anyways...\n");
+    }
 
     //
-    // Remote has accepted the request message, wait for the response
+    // Wait for the response
     //
     pn_messenger_set_timeout( messenger, opts.timeout );
     LOG("waiting for response...\n");
@@ -247,7 +260,7 @@ int main(int argc, char** argv)
 
     // BEGIN HACK: wait until remote has seen our outcome state and
     // has settled its delivery
-    pn_messenger_set_timeout( messenger, 0 );
+    pn_messenger_set_timeout( messenger, 500 );
     pn_messenger_recv( messenger, -1 );
     if (pn_messenger_status( messenger, response_tracker) == PN_STATUS_UNKNOWN) {
         fprintf( stderr, "Timed out waiting for server to settle the response.\n" );
