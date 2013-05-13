@@ -1,0 +1,24 @@
+To build, create a "build" directory at the same level as this README:
+
+  mkdir build
+  cd build
+
+If you don't have the proton developer libraries/includes installed,
+you'll need to check out a copy of the proton build tree and build the
+C libraries (see the proton project for details) .  Once built, set
+the path to the top level directory (the directory that contains
+'proton-c') via the "PROTON_SOURCE_DIR" build variable:
+
+  cmake -DPROTON_SOURCE_DIR=/home/kgiusti/work/proton/qpid-proton ..
+
+This should result in a server executable (f-server), and a client
+executable (f-client).
+
+Run the server:
+
+./f-server -a amqp://~0.0.0.0
+
+And in a different shell, run the client:
+
+./f-client -a amqp://0.0.0.0
+

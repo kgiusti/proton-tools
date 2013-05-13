@@ -28,11 +28,13 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <glib.h>
+#include <uuid/uuid.h>
 
 typedef struct {
     const char *address;
     unsigned int delay;
-    unsigned int ttl;
+    unsigned int duration;      // for duplication detection
     unsigned int retry;
     unsigned int backoff;
     int timeout;  // seconds
@@ -51,7 +53,7 @@ static void usage(int rc)
            " -a <addr> \tAddress to listen on [amqp://~0.0.0.0]\n"
            " -d <seconds> \tDelay <seconds> before processing and replying [0]\n"
            " -t # \tResponse timeout in seconds, -1 = no timeout [-1]\n"
-           " -l <seconds> \tDefault TTL for saving received messages [60]\n"
+           " -l <seconds> \tDefault duration for saving received messages [60]\n"
            " -R # \tMessage send retry limit [10]\n"
            " -B <secs> \tRetry backoff timeout [5]\n"
            " -V \tEnable debug logging\n"
@@ -65,7 +67,7 @@ static void parse_options( int argc, char **argv, Options_t *opts )
     opterr = 0;
 
     memset( opts, 0, sizeof(*opts) );
-    opts->ttl = 60;
+    opts->duration = 60;
     opts->timeout = -1;
     opts->retry = 10;
     opts->backoff = 5;
@@ -80,7 +82,7 @@ static void parse_options( int argc, char **argv, Options_t *opts )
             }
             break;
         case 'l':
-            if (sscanf( optarg, "%u", &opts->ttl ) != 1) {
+            if (sscanf( optarg, "%u", &opts->duration ) != 1) {
                 fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
                 usage(1);
             }
@@ -187,20 +189,70 @@ static int decode_request( pn_message_t *message,
 }
 
 
-// save reply in case duplicate request is receive
-static void remember_request( pn_message_t *message )
+static GHashTable *deduplication_db;
+
+typedef struct {
+    char  id[37];  // key: UUID ascii len + 1
+    pn_timestamp_t expire;
+} DeDuplicateNode_t;
+
+
+static void init_deduplication_db()
 {
+    deduplication_db = g_hash_table_new( g_str_hash, g_str_equal );
+    check( deduplication_db, "Failed to initialize de-duplication hashtable." );
 }
 
-// has request message already been seen?
+// remember the received message until "expire" time
+//
+static void remember_request( pn_message_t *message, pn_timestamp_t expire )
+{
+    pn_atom_t id = pn_message_get_id( message );
+    if (id.type != PN_UUID) {
+        fprintf(stderr, "Unexpected message id received: %d\n",
+                (int) id.type);
+        return;
+    }
+
+    char tmp[37];
+    uuid_unparse_upper( *(uuid_t *)&id.u.as_uuid.bytes, tmp );
+    LOG("Remembering message with id '%s'...\n", tmp );
+
+    DeDuplicateNode_t *n = (DeDuplicateNode_t *) g_hash_table_lookup( deduplication_db, tmp );
+    if (n) {   // already in table, update expire time
+        LOG("... already present, updating expire time to %ul\n", (unsigned long) expire );
+        n->expire = expire;
+    } else {
+        n = malloc( sizeof(DeDuplicateNode_t) );
+        check( n, "Out of memory." );
+        strcpy( n->id, tmp );
+        n->expire = expire;
+        g_hash_table_insert( deduplication_db, n->id, n );
+    }
+}
+
+// has message already been seen?
 static bool is_duplicate( pn_message_t *message )
 {
-    return false;
-}
+    pn_atom_t id = pn_message_get_id( message );
+    if (id.type != PN_UUID) {
+        fprintf(stderr, "Unexpected message id received: %d\n",
+                (int) id.type);
+        return false;
+    }
 
-// remove expired requests from the database
-static void forget_old_requests( )
-{
+    char tmp[37];
+    uuid_unparse_upper( *(uuid_t *)&id.u.as_uuid.bytes, tmp );
+
+    DeDuplicateNode_t *n = (DeDuplicateNode_t *) g_hash_table_lookup( deduplication_db, tmp );
+    if (n && n->expire <= msgr_now()) {
+        LOG( "expiring old message from deduplication database\n" );
+        g_hash_table_remove( deduplication_db, n->id );
+        free( n );
+        n = NULL;
+    }
+
+    return n != NULL;
 }
 
 
@@ -224,8 +276,7 @@ int main(int argc, char** argv)
     // only 1 message (request/response) outstanding at a time
     pn_messenger_set_outgoing_window( messenger, 1 );
     pn_messenger_set_incoming_window( messenger, 1 );
-    if (opts.ttl)
-        pn_messenger_set_timeout( messenger, opts.ttl * 1000 );
+    pn_messenger_set_timeout( messenger, -1 );
     pn_messenger_start(messenger);
 
     LOG("Subscribing to '%s'\n", opts.address);
@@ -235,12 +286,6 @@ int main(int argc, char** argv)
 
         LOG("Calling pn_messenger_recv(%d)\n", 1);
         rc = pn_messenger_recv(messenger, 1);
-        if (rc == PN_TIMEOUT) {
-            LOG("purging old replies\n");
-            forget_old_requests();
-            continue;
-        }
-
         check(rc == 0, "pn_messenger_recv() failed");
 
         LOG("Messages on incoming queue: %d\n", pn_messenger_incoming(messenger));
@@ -284,16 +329,15 @@ int main(int argc, char** argv)
                 fortune = new_fortune;
             }
 
-            remember_request( request_msg );
+            remember_request( request_msg, msgr_now() + opts.duration * 1000 );
 
             // BEGIN HACK: before we can settle, we need to wait for
             // the sender to settle first.  See amqp-1.0 spec -
             // exactly once delivery
             LOG("waiting for sender to settle the request...\n");
-            int old_timeout = pn_messenger_get_timeout( messenger );
             pn_messenger_set_timeout( messenger, 0 );
             pn_messenger_recv( messenger, -1 );
-            pn_messenger_set_timeout( messenger, old_timeout );
+            pn_messenger_set_timeout( messenger, -1 );
             if (pn_messenger_status( messenger, request_tracker) != PN_STATUS_ACCEPTED) {
                 fprintf(stderr, "Remote did not settle as expected! %d\n",
                         (int)pn_messenger_status( messenger, request_tracker));
