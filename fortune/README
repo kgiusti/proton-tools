@@ -27,3 +27,78 @@ And in a different shell, run the client:
 
 ./f-server -a amqp://0.0.0.0:5672/SERVER
 ./f-client -a amqp://0.0.0.0:5672/SERVER -r amqp://0.0.0.0:5672/CLIENT
+
+
+NOTES
+-----
+
+This is an attempt to build a simple RPC-like client and server over
+Messenger.
+
+The goal is to provide an example of a request-response messaging
+pattern, with "guaranteed" (note the quotes) delivery of both the
+request and the response.
+
+This example is in the form of a simple "fortune" server.  The server
+will store a simple text message - the fortune - and provide clients
+access to it.  Clients can request to 'get' the current fortune, or
+'set' the fortune to a new value.
+
+RPC messages are implemented as simple maps that contain the type of
+message (request or response), and any additional parameters.
+
+The Client:
+
+The client sends a request message to the server.  Should the send
+operation fail with an unknown delivery status, the client will retry
+sending the message.  Once the message has been sent successfully, or
+the total number of retries exhausted, the client will attempt to
+receive the response.
+
+There are various tunable parameters that affect how the client
+behaves, like the maximum number of send retries, timeouts, and
+backoff period, etc.
+
+
+The Server:
+
+The server will process request messages sent by the clients, and send
+a response message to each valid request.  Invalid requests are
+rejected at the delivery level.  The server must deal with handling
+duplicate requests.  This is done by keeping a database of received
+messages, which is used to filter out already received messages.
+Messages are identified using the "message-id" field, which is
+described in the AMQP-1.0 specification.
+
+The server will re-send Response messages if the send operation should
+fail.
+
+
+Guaranteed Delivery:
+
+This implementation attempts to use the delivery status of send and
+received messages in order to guarantee delivery.  It does this
+poorly.  The basic idea was to model the "3-Ack" procedure described
+in the AMQP-1.0 specification (see section 2.6.12 Transferring A
+Message).  The implemented behavior is described below:
+
+Sending:
+
+Once a message is sent, the sender checks the remote state via the
+pn_tracker_t object associated with the message.  If the remote state
+is ACCEPTED, the sender considers the message send successful.  If the
+remote state is REJECTED, the sender considers the message send
+permanently failed, and will not retry.  If the remote state is
+unknown (after a timeout period), the sender will re-send the message.
+Once the remote state is determined, or after a timeout, the sender
+will settle the message transfer.
+
+Receiving:
+
+Once a message is received, it is validated.  The result of that
+validation is used to determine the outcome of the receipt: either
+ACCEPTED or REJECTED.  This outcome is then set using the message's
+associated pn_tracker_t.  The receiver then waits until the remote
+(sender) has settled the message before it settles the transfer
+locally.
+
