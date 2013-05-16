@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <getopt.h>
 #include <uuid/uuid.h>
 
 
@@ -35,12 +36,11 @@ typedef struct {
     const char *address;
     const char *gateway_addr;
     const char *new_fortune;
-    int timeout;  // seconds
+    int timeout;  // milliseconds
     const char *reply_to;
-    int reject;
+    int send_bad_msg;
     unsigned int ttl;
     unsigned int retry;
-    unsigned int backoff;
 } Options_t;
 
 static void usage(int rc)
@@ -51,12 +51,11 @@ static void usage(int rc)
            " -s <message> \tSet the server's fortune message to \"<message>\"\n"
            " -g <gateway> \tGateway to use to reach <f-server>\n"
            " -r <address> \tUse <address> for reply-to\n"
-           " -t # \tTimeout in seconds [1]\n"
+           " -t # \tTimeout in seconds [5]\n"
            " -l <secs> \tTTL to set in message, 0 = no TTL [0]\n"
-           " -R # \tMessage send retry limit [10]\n"
-           " -B <secs> \tRetry backoff timeout [5]\n"
+           " -R # \tMessage send retry limit [3]\n"
            " -V \tEnable debug logging\n"
-           " -X \tSend a bad message (forces a REJECT from f-server\n"
+           " -X \tSend a bad message (forces a failure response from f-server\n"
            );
     exit(rc);
 }
@@ -67,11 +66,10 @@ static void parse_options( int argc, char **argv, Options_t *opts )
     opterr = 0;
 
     memset( opts, 0, sizeof(*opts) );
-    opts->timeout = 1;
+    opts->timeout = 5;
     opts->retry = 3;
-    opts->backoff = 5;
 
-    while ((c = getopt(argc, argv, "a:s:g:t:r:l:R:B:VX")) != -1) {
+    while ((c = getopt(argc, argv, "a:s:g:t:r:l:R:VX")) != -1) {
         switch (c) {
         case 'a': opts->address = optarg; break;
         case 's': opts->new_fortune = optarg; break;
@@ -95,14 +93,8 @@ static void parse_options( int argc, char **argv, Options_t *opts )
                 usage(1);
             }
             break;
-        case 'B':
-            if (sscanf( optarg, "%u", &opts->backoff ) != 1) {
-                fprintf(stderr, "Option -%c requires an integer argument.\n", optopt);
-                usage(1);
-            }
-            break;
         case 'V': enable_logging(); break;
-        case 'X': opts->reject = 1; break;
+        case 'X': opts->send_bad_msg = 1; break;
 
         default:
             usage(1);
@@ -123,19 +115,24 @@ static void process_reply( pn_messenger_t *messenger,
     pn_bytes_t m_command;
     pn_bytes_t m_value;
     pn_bytes_t m_status;
+    bool duplicate = false;
+
     rc = pn_data_scan( body, "{.S.S.S.S}",
                        &m_type, &m_command, &m_value, &m_status );
     check( rc == 0, "Failed to decode response message" );
     check(strncmp("response", m_type.start, m_type.size) == 0, "Unknown message type received");
-    if (strncmp("OK", m_status.start, m_status.size)) {
+    if (strncmp("DUPLICATE", m_status.start, m_status.size) == 0) {
+        LOG( "Server detected duplicate request!\n" );
+        duplicate = true;
+    } else if (strncmp("OK", m_status.start, m_status.size)) {
         fprintf( stderr, "Request failed - error: %.*s\n", (int)m_status.size, m_status.start );
         return;
     }
-    if (strncmp("get", m_command.start, m_command.size) == 0) {
-        fprintf( stdout, "Fortune: \"%.*s\"\n", (int)m_value.size, m_value.start );
-    } else {
-        fprintf( stdout, "Fortune set to \"%.*s\"\n", (int)m_value.size, m_value.start );
-    }
+
+    fprintf( stdout, "Fortune%s: \"%.*s\"%s\n",
+             strncmp("set", m_command.start, m_command.size) == 0 ? " set to" : "",
+             (int)m_value.size, m_value.start,
+             duplicate ? " (duplicate detected by server)" : "" );
 }
 
 
@@ -159,13 +156,6 @@ static pn_message_t *build_request_message(pn_message_t *message,
     if (ttl)
         pn_message_set_ttl( message, ttl * 1000 );
 
-    // unique identifier for this message
-    uuid_t uuid;
-    uuid_generate(uuid);
-    pn_atom_t id;
-    id.type = PN_UUID;
-    memcpy( id.u.as_uuid.bytes, uuid, sizeof(id.u.as_uuid.bytes) );
-    pn_message_set_id( message, id );
 
     pn_data_t *body = pn_message_body(message);
     pn_data_clear( body );
@@ -192,9 +182,11 @@ int main(int argc, char** argv)
 
     parse_options( argc, argv, &opts );
 
-    // only 1 message (request/response) outstanding at a time
-    pn_messenger_set_outgoing_window( messenger, 1 );
-    pn_messenger_set_incoming_window( messenger, 1 );
+    // no need to track outstanding messages
+    pn_messenger_set_outgoing_window( messenger, 0 );
+    pn_messenger_set_incoming_window( messenger, 0 );
+
+    pn_messenger_set_timeout( messenger, opts.timeout );
 
     if (opts.gateway_addr) {
         LOG( "routing all messages via %s\n", opts.gateway_addr );
@@ -209,8 +201,9 @@ int main(int argc, char** argv)
     if (opts.reply_to) {
         LOG("subscribing to %s for replies\n", opts.reply_to);
         pn_messenger_subscribe(messenger, opts.reply_to);
-        reply_to = msgr_strdup(opts.reply_to);
+        reply_to = _strdup(opts.reply_to);
         check( reply_to, "Out of memory" );
+#if 1
         // need to 'fix' the reply-to for use in the message itself:
         // no '~' is allowed in that case
         char *tilde = strstr( reply_to, "://~" );
@@ -218,64 +211,73 @@ int main(int argc, char** argv)
             tilde += 3;  // overwrite '~'
             memmove( tilde, tilde + 1, strlen( tilde + 1 ) + 1 );
         }
+#endif
     }
 
     // Create a request message
     //
     const char *command = opts.new_fortune ? "set" : "get";
     build_request_message( request_msg,
-                           opts.reject ? "bad-command" : command,
+                           opts.send_bad_msg ? "bad-command" : command,
                            opts.address, reply_to,
                            opts.new_fortune, opts.ttl );
 
-    DeliveryStatus_t ds = deliver_message( messenger, request_msg,
-                                           opts.retry, opts.timeout, opts.backoff );
-    if (ds == STATUS_REJECTED) {
-        fprintf( stderr, "Remote rejected the request - exiting." );
-        exit(1);
-    } else if (ds != STATUS_ACCEPTED) {
-        LOG("Remote may not have received the request!  Waiting for reply anyways...\n");
+    // set a unique identifier for this message, so remote can
+    // de-duplicate when we re-transmit
+    uuid_t uuid;
+    uuid_generate(uuid);
+    char uuid_str[37];
+    uuid_unparse_upper(uuid, uuid_str);
+    pn_data_put_string( pn_message_id( request_msg ),
+                        pn_bytes( sizeof(uuid_str), uuid_str ));
+
+    // set the correlation id so we can ensure the response matches
+    // our request. (re-use uuid just 'cause it's easy!)
+    pn_data_put_string( pn_message_correlation_id( request_msg ),
+                        pn_bytes( sizeof(uuid_str), uuid_str ));
+
+    int send_count = 0;
+    bool done = false;
+
+    // keep re-transmitting until something arrives
+    do {
+        LOG("sending request message...\n");
+        rc = pn_messenger_put( messenger, request_msg );
+        check(rc == 0, "pn_messenger_put() failed");
+        send_count++;
+        if (opts.retry) opts.retry--;
+
+        LOG("waiting for response...\n");
+        rc = pn_messenger_recv( messenger, -1 );
+        if (rc == PN_TIMEOUT) {
+            LOG( "Timed-out waiting for a response, retransmitting...\n" );
+            pn_message_set_delivery_count( request_msg, send_count );
+        } else {
+            check(rc == 0, "pn_messenger_recv() failed\n");
+
+            while (pn_messenger_incoming( messenger ) > 0) {
+                rc = pn_messenger_get( messenger, response_msg );
+                check(rc == 0, "pn_messenger_get() failed");
+
+                LOG("response received!\n");
+                // validate the correlation id
+                pn_bytes_t cid = pn_data_get_string( pn_message_correlation_id( response_msg ) );
+                if (cid.size == 0 || strncmp( uuid_str, cid.start, cid.size )) {
+                    LOG( "Correlation Id mismatch!  Ignoring this response!\n" );
+                } else {
+                    process_reply( messenger, response_msg );
+                    done = true;
+                }
+            }
+        }
+    } while (!done && opts.retry);
+
+    if (!done) {
+        fprintf( stderr, "Retries exhausted, no response received from server!\n" );
     }
-
-    //
-    // Wait for the response
-    //
-    pn_messenger_set_timeout( messenger, opts.timeout );
-    LOG("waiting for response...\n");
-
-    rc = pn_messenger_recv( messenger, 1 );
-    if (rc) LOG("pn_messenger_recv() failed: error=%d\n", rc );
-    check(pn_messenger_incoming( messenger ), "No response received from server!\n");
-
-    rc = pn_messenger_get( messenger, response_msg );
-    check(rc == 0, "pn_messenger_get() failed");
-    LOG("response received!\n");
-
-    process_reply( messenger, response_msg );
-
-    // Now tell the server we've moved to our terminal state (ACCEPT)
-    pn_tracker_t response_tracker = pn_messenger_incoming_tracker( messenger );
-    rc = pn_messenger_accept( messenger, response_tracker, 0 );
-    check(rc == 0, "pn_messenger_accept() failed");
-
-    // BEGIN HACK: wait until remote has seen our outcome state and
-    // has settled its delivery
-    pn_messenger_set_timeout( messenger, 500 );
-    pn_messenger_recv( messenger, -1 );
-    if (pn_messenger_status( messenger, response_tracker) == PN_STATUS_UNKNOWN) {
-        fprintf( stderr, "Timed out waiting for server to settle the response.\n" );
-    }
-    pn_messenger_set_timeout( messenger, opts.timeout );
-    // END HACK
-
-    LOG("settling the received response...\n");
-    rc = pn_messenger_settle( messenger, response_tracker, 0 );
-    check(rc == 0, "pn_messenger_settle() failed");
-    LOG("settled response delivery!\n");
 
     rc = pn_messenger_stop(messenger);
     check(rc == 0, "pn_messenger_stop() failed");
-    check_messenger(messenger);
 
     pn_messenger_free(messenger);
     pn_message_free( response_msg );

@@ -17,15 +17,7 @@
 # under the License.
 #
 
-add_executable(f-client f-client.c)
-add_executable(f-server f-server.c)
-
-target_link_libraries(f-client proton_tools ${PROTON_LIB} ${GLIB2_LIBRARIES} ${UUID_LIBRARIES})
-target_link_libraries(f-server proton_tools ${PROTON_LIB} ${GLIB2_LIBRARIES} ${UUID_LIBRARIES})
-
-set_source_files_properties (
-  f-client f-server
-  PROPERTIES
-  COMPILE_FLAGS "${COMPILE_WARNING_FLAGS} ${COMPILE_LANGUAGE_FLAGS}"
+set( protontools_lib_SOURCES
+     common.c
 )
-
+add_library( proton_tools SHARED ${protontools_lib_SOURCES} )
