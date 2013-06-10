@@ -61,4 +61,5 @@ set (CMAKE_BUILD_TYPE RelWithDebInfo)
 
 add_subdirectory(lib)
 add_subdirectory(fortune)
+add_subdirectory( banco-de-justin )
 #add_subdirectory(perf)
