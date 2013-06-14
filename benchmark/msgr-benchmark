@@ -18,7 +18,7 @@
 # under the License.
 #
 import optparse, sys, re
-import csv, time
+import csv, time, os, os.path
 from proton_tests.common import MessengerSenderC, MessengerReceiverC, \
     free_tcp_ports
 
@@ -170,9 +170,21 @@ def main(argv=None):
     parser.add_option("-t", "--timeout", action="store", type="int",
                       default=60,
                       help="set the default test timeout (in seconds) [%default].")
-    parser.add_option("-d", "--db", action="store", default="./.msgr-bm-db",
+    parser.add_option("-d", "--db", action="store", default="./.msgr-db",
                       help="path to database for storing benchmark results [%default].")
+    parser.add_option("--save", action="store_true", default=False,
+                      help="store the results of the benchmark to the database [%default].")
+
     opts, extra = parser.parse_args(args=argv)
+
+    if opts.save:
+        if not os.path.exists( opts.db ):
+            os.makedirs( opts.db );
+        elif not os.path.isdir( opts.db ):
+            raise TypeError("--db parameter must be a directory!")
+
+    latency_filename = "%s/AL_%s.csv"
+    throughput_filename = "%s/T_%s.csv"
 
     tests = [
         ("Loopback (64byte)", test_loopback_64),
@@ -186,29 +198,42 @@ def main(argv=None):
         latencies = results[0]
         throughputs = results[1]
 
+        # sanitize the test name so it may be used as a filename
+        test_filename = re.sub('[)( ]', '_', t[0])
+
         if latencies:
             latencies.sort()
             low = latencies[0]
             high = latencies[-1]
             avg = sum(latencies)/len(latencies)
-            latencies = (opts.label, low, avg, high)
             #print latencies
-            with open('latency.csv', 'ab') as f:
-                writer = csv.writer(f)
-                writer.writerows([latencies])
-                f.close()
+            if opts.save:
+                latencies = (opts.label, low, avg, high)
+                with open(latency_filename % (opts.db, test_filename), 'ab') as f:
+                    writer = csv.writer(f)
+                    writer.writerows([latencies])
+                    f.close()
+            else:
+                latencies = (t[0], low, avg, high)
+                print("%s latency: min avg=%f secs, mean=%f secs, max avg=%f secs"
+                      % latencies)
 
         if throughputs:
             throughputs.sort()
             low = throughputs[0]
             high = throughputs[-1]
             avg = sum(throughputs)/len(throughputs)
-            throughputs = (opts.label, low, avg, high)
             #print throughputs
-            with open('throughput.csv', 'ab') as f:
-                writer = csv.writer(f)
-                writer.writerows([throughputs])
-                f.close()
+            if opts.save:
+                throughputs = (opts.label, low, avg, high)
+                with open(throughput_filename % (opts.db, test_filename), 'ab') as f:
+                    writer = csv.writer(f)
+                    writer.writerows([throughputs])
+                    f.close()
+            else:
+                throughputs = (t[0], low, avg, high)
+                print("%s throughput: min=%f msgs/sec, mean=%f msgs/sec, max=%f msgs/sec"
+                      % throughputs)
 
         # gnuplot> set datafile separator ','
         # plot 'throughput.csv' using 0:3:2:4:xticlabels(1) with yerrorlines
