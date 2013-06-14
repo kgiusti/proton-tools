@@ -77,8 +77,7 @@ def test_loopback_64( iterations=5, timeout=0, verbose=False ):
     $ msgr-send -a amqp://0.0.0.0:9999 -c 100000 -b 64 -p 1024 -R
     """
 
-    msg_count = 10000
-    #msg_count = 1000000
+    msg_count = 1000000
     port = free_tcp_ports()[0]
 
     receivers = []
