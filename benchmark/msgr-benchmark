@@ -1,0 +1,220 @@
+#!/usr/bin/env python
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+import optparse, sys, re
+import csv, time
+from proton_tests.common import MessengerSenderC, MessengerReceiverC, \
+    free_tcp_ports
+
+
+def parse_msgr_output( output ):
+    """
+    Parses the output from the msgr-send/msgr-receive tools, extracting the
+    throughput and average latency values.
+    Expects output to be in the following pattern:
+        Messages sent: %d recv: %d\n
+        Total time: %f sec\n
+        Throughput: %f msgs/sec\n
+        Latency (sec): %f min %f max %f avg\n
+    Extracts the values for throughput and average latency, and returns them as
+    floats in a tuple of the form (<average_latency>, <throughput>).
+    """
+    regexp_float = "([-+]?\d+\.\d*)?"
+    regexp_throughput = "^Throughput: %s msgs/sec" % regexp_float
+    regexp_latency = "^Latency \(sec\): %s min %s max %s avg" % (regexp_float,
+                                                                 regexp_float,
+                                                                 regexp_float)
+    try:
+        l = re.search( regexp_latency, output, re.MULTILINE )
+        t = re.search( regexp_throughput, output, re.MULTILINE )
+        return (float(l.groups()[2]), float(t.groups()[0]))
+    except:
+        print( "Unable to parse output from msgr-send/msgr-recv!\n"
+               "  Has the format of the output changed???" )
+        raise
+
+
+def run_test( receivers, senders, verbose=False ):
+    """
+    Run a test using a set of senders and receivers.
+    """
+
+    for R in receivers:
+        R.start( verbose )
+
+    for S in senders:
+        S.start( verbose )
+
+    for S in senders:
+        S.wait()
+        assert S.status() == 0, "Command '%s' failed" % str(S.cmdline())
+
+    for R in receivers:
+        R.wait()
+        assert R.status() == 0, "Command '%s' failed" % str(R.cmdline())
+
+
+def test_loopback_64( iterations=5, timeout=0, verbose=False ):
+    """
+    Loopback test - one sender, one receiver, 64 byte messages.
+    $ msgr-recv -a amqp://~0.0.0.0:9999 -c 100000 -R -b 2048
+    $ msgr-send -a amqp://0.0.0.0:9999 -c 100000 -b 64 -p 1024 -R
+    """
+
+    msg_count = 10000
+    #msg_count = 1000000
+    port = free_tcp_ports()[0]
+
+    receivers = []
+    receiver = MessengerReceiverC()
+    receiver.subscriptions = ["amqp://~0.0.0.0:%s" % port]
+    receiver.receive_count = msg_count
+    receiver.send_reply = True
+    receiver.timeout = timeout
+    receiver.recv_count = 2048
+    receivers.append( receiver )
+
+    senders = []
+    sender = MessengerSenderC()
+    sender.targets = ["amqp://0.0.0.0:%s" % port]
+    sender.send_count = msg_count
+    sender.get_reply = True
+    sender.send_batch = 1024
+    sender.msg_size = 64
+    sender.timeout = timeout
+    senders.append( sender )
+
+    latencies = []
+    throughputs = []
+
+    for i in range(iterations):
+        run_test( receivers, senders, verbose )
+        # results from sender should be "good enough"
+        results = parse_msgr_output( sender.stdout() )
+        latencies.append( results[0] )
+        throughputs.append( results[1] )
+
+    return (latencies, throughputs)
+
+
+def test_large_msg_2M( iterations=5, timeout=0, verbose=False ):
+    """
+    Large message test - one sender, one receiver, 2 Mbyte messages.
+    $ msgr-recv -a amqp://~0.0.0.0:9999 -c 100000 -R -b 100
+    $ msgr-send -a amqp://0.0.0.0:9999 -c 100000 -b 2097152 -p 10 -R
+    """
+
+    msg_count = 1000
+    port = free_tcp_ports()[0]
+
+    receivers = []
+    receiver = MessengerReceiverC()
+    receiver.subscriptions = ["amqp://~0.0.0.0:%s" % port]
+    receiver.receive_count = msg_count
+    receiver.send_reply = False
+    receiver.timeout = timeout
+    receiver.recv_count = 100
+    receivers.append( receiver )
+
+    senders = []
+    sender = MessengerSenderC()
+    sender.targets = ["amqp://0.0.0.0:%s" % port]
+    sender.send_count = msg_count
+    sender.get_reply = False
+    sender.send_batch = 2
+    sender.msg_size = 2097152
+    sender.timeout = timeout
+    senders.append( sender )
+
+    latencies = []
+    throughputs = []
+
+    for i in range(iterations):
+        run_test( receivers, senders, verbose )
+        results = parse_msgr_output( receiver.stdout() )
+        latencies.append( results[0] )
+        results = parse_msgr_output( sender.stdout() )
+        throughputs.append( results[1] )
+
+    return (latencies, throughputs)
+
+
+def main(argv=None):
+    """
+    Run a series of benchmarks against Messenger.  Add the results to a database.
+    """
+
+    parser = optparse.OptionParser()
+    parser.add_option("-l", "--label", action="store", default=time.asctime(),
+                      help="label used to index this benchmark in the database [%default].")
+    parser.add_option("-i", "--iterations", action="store", type="int", default=5,
+                      help="# of times to repeat each test [%default].")
+    parser.add_option("-v", "--verbose", action="store_true",
+                      help="print extra detail to stdout.")
+    parser.add_option("-t", "--timeout", action="store", type="int",
+                      default=60,
+                      help="set the default test timeout (in seconds) [%default].")
+    parser.add_option("-d", "--db", action="store", default="./.msgr-bm-db",
+                      help="path to database for storing benchmark results [%default].")
+    opts, extra = parser.parse_args(args=argv)
+
+    tests = [
+        ("Loopback (64byte)", test_loopback_64),
+        ("Large Msg (2Mbyte)", test_large_msg_2M)
+        ]
+
+    for t in tests:
+        if opts.verbose: print("Executing test '%s'..." % t[0])
+        results = t[1](opts.iterations, opts.timeout, opts.verbose)
+        if opts.verbose: print(" complete!")
+        latencies = results[0]
+        throughputs = results[1]
+
+        if latencies:
+            latencies.sort()
+            low = latencies[0]
+            high = latencies[-1]
+            avg = sum(latencies)/len(latencies)
+            latencies = (opts.label, low, avg, high)
+            #print latencies
+            with open('latency.csv', 'ab') as f:
+                writer = csv.writer(f)
+                writer.writerows([latencies])
+                f.close()
+
+        if throughputs:
+            throughputs.sort()
+            low = throughputs[0]
+            high = throughputs[-1]
+            avg = sum(throughputs)/len(throughputs)
+            throughputs = (opts.label, low, avg, high)
+            #print throughputs
+            with open('throughput.csv', 'ab') as f:
+                writer = csv.writer(f)
+                writer.writerows([throughputs])
+                f.close()
+
+        # gnuplot> set datafile separator ','
+        # plot 'throughput.csv' using 0:3:2:4:xticlabels(1) with yerrorlines
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
