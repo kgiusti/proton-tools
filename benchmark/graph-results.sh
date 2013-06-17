@@ -17,7 +17,36 @@
 # specific language governing permissions and limitations
 # under the License.
 #
+
+
+#
+# Graph the contents of the benchmark database using gnuplot
+#
+
 #set -x
-for f in `find .msgr-db -name "*.csv"`; do
-    gnuplot -p -e "set datafile separator ','; plot '$f' using 0:3:2:4:xticlabels(1) with yerrorlines"
+GNUPLOT=$(type -p gnuplot)
+if [[ !(-x $GNUPLOT) ]] ; then
+    echo >&2 "'gnuplot' command not available, cannot graph results"
+    exit 0
+fi
+
+database=".msgr-db"
+while getopts "d:h" opt; do
+  case $opt in
+    d)
+      echo "-d was triggered!" >&2
+      ;;
+    h | \?)
+      echo "Usage: $0 [-d <database>]" >&2
+      echo "  <database> defaults to '$database'" >&2
+      exit 1
+      ;;
+  esac
+done
+
+for f in `find $database -name "*.csv"`; do
+    gnuplot -p <<-EOF
+        set datafile separator ','
+        plot '$f' using 0:3:2:4:xticlabels(1) with yerrorlines
+EOF
 done

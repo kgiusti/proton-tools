@@ -70,7 +70,7 @@ def run_test( receivers, senders, verbose=False ):
         assert R.status() == 0, "Command '%s' failed" % str(R.cmdline())
 
 
-def test_loopback_64( iterations=5, timeout=0, verbose=False ):
+def test_loopback_64( iterations, timeout=0, verbose=False ):
     """
     Loopback test - one sender, one receiver, 64 byte messages.
     $ msgr-recv -a amqp://~0.0.0.0:9999 -c 100000 -R -b 2048
@@ -112,7 +112,7 @@ def test_loopback_64( iterations=5, timeout=0, verbose=False ):
     return (latencies, throughputs)
 
 
-def test_large_msg_2M( iterations=5, timeout=0, verbose=False ):
+def test_large_msg_2M( iterations, timeout=0, verbose=False ):
     """
     Large message test - one sender, one receiver, 2 Mbyte messages.
     $ msgr-recv -a amqp://~0.0.0.0:9999 -c 100000 -R -b 100

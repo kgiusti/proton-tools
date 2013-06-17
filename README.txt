@@ -13,6 +13,7 @@ CONTENTS
 fortune/ - a simple client/server, REST-like messaging example
 banco-de-justin/ - 'Bank of Justin', a transaction-like messaging
                     example using Proton Messenger's delivery state.
+benchmark/ - a to benchmark Proton Messenger
 
 BUILDING
 --------
