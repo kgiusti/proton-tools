@@ -34,7 +34,7 @@ database=".msgr-db"
 while getopts "d:h" opt; do
   case $opt in
     d)
-      echo "-d was triggered!" >&2
+      database=$OPTARG
       ;;
     h | \?)
       echo "Usage: $0 [-d <database>]" >&2
@@ -46,6 +46,7 @@ done
 
 for f in `find $database -name "*.csv"`; do
     gnuplot -p <<-EOF
+        set bars 4
         set datafile separator ','
         plot '$f' using 0:3:2:4:xticlabels(1) with yerrorlines
 EOF
