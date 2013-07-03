@@ -190,53 +190,81 @@ def main(argv=None):
         ("Large Msg (2Mbyte)", test_large_msg_2M)
         ]
 
+    latencies = []
+    throughputs = []
+
     for t in tests:
         if opts.verbose: print("Executing test '%s'..." % t[0])
         results = t[1](opts.iterations, opts.timeout, opts.verbose)
         if opts.verbose: print(" complete!")
-        latencies = results[0]
-        throughputs = results[1]
+        test_latencies = results[0]
+        test_throughputs = results[1]
 
-        # sanitize the test name so it may be used as a filename
-        test_filename = re.sub('[)( ]', '_', t[0])
+        if test_latencies:
+            test_latencies.sort()
+            low = test_latencies[0]
+            high = test_latencies[-1]
+            avg = sum(test_latencies)/len(test_latencies)
+            latencies.append( (t[0], low, avg, high) )
 
-        if latencies:
-            latencies.sort()
-            low = latencies[0]
-            high = latencies[-1]
-            avg = sum(latencies)/len(latencies)
-            #print latencies
-            if opts.save:
-                latencies = (opts.label, low, avg, high)
-                with open(latency_filename % (opts.db, test_filename), 'ab') as f:
-                    writer = csv.writer(f)
-                    writer.writerows([latencies])
-                    f.close()
-            else:
-                latencies = (t[0], low, avg, high)
-                print("%s latency: min avg=%f secs, mean=%f secs, max avg=%f secs"
-                      % latencies)
+        if test_throughputs:
+            test_throughputs.sort()
+            low = test_throughputs[0]
+            high = test_throughputs[-1]
+            avg = sum(test_throughputs)/len(test_throughputs)
+            throughputs.append( (t[0], low, avg, high) )
 
-        if throughputs:
-            throughputs.sort()
-            low = throughputs[0]
-            high = throughputs[-1]
-            avg = sum(throughputs)/len(throughputs)
-            #print throughputs
-            if opts.save:
-                throughputs = (opts.label, low, avg, high)
-                with open(throughput_filename % (opts.db, test_filename), 'ab') as f:
-                    writer = csv.writer(f)
-                    writer.writerows([throughputs])
-                    f.close()
-            else:
-                throughputs = (t[0], low, avg, high)
-                print("%s throughput: min=%f msgs/sec, mean=%f msgs/sec, max=%f msgs/sec"
-                      % throughputs)
-
+    if opts.save:
         # gnuplot> set datafile separator ','
         # plot 'throughput.csv' using 0:3:2:4:xticlabels(1) with yerrorlines
+        for l in latencies:
+            # sanitize the test name so it may be used as a filename
+            test_filename = re.sub('[)( ]', '_', l[0])
+            with open(latency_filename % (opts.db, test_filename), 'ab') as f:
+                writer = csv.writer(f)
+                # (label, low, avg, hi)
+                writer.writerows([(opts.label, l[1], l[2], l[3])])
+                f.close()
 
+        for t in throughputs:
+            test_filename = re.sub('[)( ]', '_', l[0])
+            with open(throughput_filename % (opts.db, test_filename), 'ab') as f:
+                writer = csv.writer(f)
+                # (label, low, avg, hi)
+                writer.writerows([(opts.label, t[1], t[2], t[3])])
+                f.close()
+
+    header_format = "%-22s\t%16s\t%16s\t%16s"
+    data_format =   "  %-20s\t%16.6f\t%16.6f\t%16.6f"
+    if latencies:
+        print(header_format % ("LATENCY (secs)", "min", "mean", "high"))
+        for l in latencies:
+            print(data_format % l)
+    if throughputs:
+        print(header_format % ("THROUGHPUT (msgs/sec)", "min", "mean", "high"))
+        for t in throughputs:
+            print(data_format % t )
+
+    # The dreaded Ross-o-meter score:
+    # normalize a "good" result to a score of 1000 (higher is better)
+    #   latency of 1ms --> 1000, shorter values give higher score
+    #   throughput of 100K msg/sec ---> 1000, greater rates give higher score
+    print "\n"
+    latency_rank = 0
+    if latencies:
+        l = [x[1] for x in latencies]
+        avg = sum(l)/len(l)
+        latency_rank = long(1.0/avg)
+    print "Jross-o-meter latency rank = %d" % latency_rank
+
+    throughput_rank = 0
+    if throughputs:
+        t = [x[1] for x in throughputs]
+        avg = sum(t)/len(t)
+        throughput_rank = long(avg/100)
+    print "Jross-o-meter throughput rank = %d" % throughput_rank
+
+    print "Combined Jross-o-meter ranking = %f" % ((latency_rank + throughput_rank)/2)
     return 0
 
 
