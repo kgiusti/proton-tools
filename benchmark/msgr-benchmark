@@ -159,7 +159,14 @@ def main(argv=None):
     Run a series of benchmarks against Messenger.  Add the results to a database.
     """
 
-    parser = optparse.OptionParser()
+    _usage = """Usage: %prog [options]"""
+    _desc = """Run a set of traffic-passing tests using Messenger-based
+clients.  For each test, report the message throughput and latency recorded
+by the test.  After running all tests, compute the Jross-o-meter ranking.
+This ranking is single metric indicating the overall performance of the
+system."""
+    
+    parser = optparse.OptionParser(usage=_usage, description=_desc)
     parser.add_option("-l", "--label", action="store", default=time.asctime(),
                       help="label used to index this benchmark in the database [%default].")
     parser.add_option("-i", "--iterations", action="store", type="int", default=5,
@@ -202,9 +209,10 @@ def main(argv=None):
 
         if test_latencies:
             test_latencies.sort()
-            low = test_latencies[0]
-            high = test_latencies[-1]
-            avg = sum(test_latencies)/len(test_latencies)
+            # convert to milliseconds:
+            low = test_latencies[0] * 1000
+            high = test_latencies[-1] * 1000
+            avg = (sum(test_latencies)/len(test_latencies)) * 1000
             latencies.append( (t[0], low, avg, high) )
 
         if test_throughputs:
@@ -235,13 +243,13 @@ def main(argv=None):
                 f.close()
 
     header_format = "%-22s\t%16s\t%16s\t%16s"
-    data_format =   "  %-20s\t%16.6f\t%16.6f\t%16.6f"
+    data_format =   "  %-20s\t%16.1f\t%16.1f\t%16.1f"
     if latencies:
-        print(header_format % ("LATENCY (secs)", "min", "mean", "high"))
+        print(header_format % ("LATENCY (msecs)", "low", "mean", "high"))
         for l in latencies:
             print(data_format % l)
     if throughputs:
-        print(header_format % ("THROUGHPUT (msgs/sec)", "min", "mean", "high"))
+        print(header_format % ("THROUGHPUT (msgs/sec)", "low", "mean", "high"))
         for t in throughputs:
             print(data_format % t )
 
@@ -249,12 +257,21 @@ def main(argv=None):
     # normalize a "good" result to a score of 1000 (higher is better)
     #   latency of 1ms --> 1000, shorter values give higher score
     #   throughput of 100K msg/sec ---> 1000, greater rates give higher score
-    print "\n"
+    print """
+The Jross-o-meter score normalizes the overall results using the following
+mapping:
+
+               Normalized                    Floor
+  Latency      l = 1 ms -> 1000              l >= 1000 ms -> 0
+  Throughput   t = 100,000 msg/sec -> 1000   t <= 100 msg/sec -> 0
+
+  Each test senario is weighted equally.  A higher score is better.
+"""
     latency_rank = 0
     if latencies:
         l = [x[1] for x in latencies]
         avg = sum(l)/len(l)
-        latency_rank = long(1.0/avg)
+        latency_rank = long(1000.0/avg)
     print "Jross-o-meter latency rank = %d" % latency_rank
 
     throughput_rank = 0

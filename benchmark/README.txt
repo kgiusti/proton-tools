@@ -129,3 +129,12 @@ graphed as a vertical bar running from the low-value to the
 high-value.  Each bar is then interconnected by a horizontal line
 graphing the mean-value points.
 
+
+TODO:
+-----
+
+I'd like to see the addition of the following test cases:
+
+o) transfers requiring explicit settlement (as opposed to pre-setted)
+o) SSL traffic (using anonymous ciphers - no need for certs)
+o) multiple links per connection, and multiple connections
