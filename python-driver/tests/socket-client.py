@@ -28,6 +28,9 @@ socket resources.
 """
 
 
+
+
+
 class EndpointEventHandler(object):
     """State machine interface for generic Proton endpoints
     """
@@ -79,7 +82,7 @@ class SenderEventHandler(EndpointEventHandler):
 class Peer(sockettransport.SocketTransport):
     """Represents a remote destination for messages send by this client.
     """
-    def __init__(self, name, socket, count):
+    def __init__(self, name, socket, count, get_replies):
 
         super(Peer, self).__init__(socket, name)
         self.connection = proton.Connection()
@@ -91,21 +94,121 @@ class Peer(sockettransport.SocketTransport):
         self.msg_count = count
         self.msgs_sent = 0
         self.replys_received = 0
-        #self.next_tick = 0
 
-    # def process_read(self):
-    #     x = self.io_socket.read_input()
-    #     print("read_input() returned %s" % x)
+        # protocol setup example:
 
-    # def process_write(self):
-    #     x = self.io_socket.write_output()
-    #     print("write_output() returned %s" % x)
+        self.connection.open()
+        ssn = self.connection.session()
+        ssn.open()
+        # bi-directional links
+        sender = ssn.sender("sender")
+        sender.target.address = "TARGET"
+        sender.open()
+        self._do_send(sender)  # kick it off
+        if get_replies:
+            receiver = ssn.receiver("receiver")
+            receiver.source.address = "SOURCE"
+            receiver.open()
+            receiver.flow(1)
 
-    # def fileno(self):
-    #     return self.io_socket.fileno()
+    """
+    Boilerplate Proton protocol processing.
+    """
+    def process_connection(self):
 
-    def do_send(self, sender):
+        NEED_INIT = proton.Endpoint.LOCAL_UNINIT
+        NEED_CLOSE = (proton.Endpoint.LOCAL_ACTIVE|proton.Endpoint.REMOTE_CLOSED)
+
+        # wait until SASL has authenticated
+        if self.sasl:
+            if self.sasl.state not in (proton.SASL.STATE_PASS,
+                                       proton.SASL.STATE_FAIL):
+                print("SASL wait.")
+                return
+
+            if self.sasl.state == proton.SASL.STATE_FAIL:
+                # @todo connection failure - must notify the application!
+                print("SASL failed for peer %s" % str(self.name))
+                return
+
+        # open all uninitialized endpoints
+
+        if self.connection.state & NEED_INIT:
+            print("Initializing connection")
+            self.connection.open()
+
+        ssn = self.connection.session_head(NEED_INIT)
+        while ssn:
+            print("Initializing session")
+            ssn.open()
+            ssn = ssn.next(NEED_INIT)
+
+        link = self.connection.link_head(NEED_INIT)
+        while link:
+            # @todo: initialize terminus addresses???
+            print("Initializing link")
+            link.open()
+            link = link.next(NEED_INIT)
+
+        link = self.connection.link_head(NEED_CLOSE)
+        while link:
+            print("Link close")
+            link.close()
+            link = link.next(NEED_CLOSE)
+
+        # process the work queue
+
+        delivery = self.connection.work_head
+        while delivery:
+            if delivery.link.is_sender:
+                self.send_update(delivery)
+            else:
+                self.recv_ready(delivery)
+            delivery = delivery.work_next
+
+        # close all endpoints closed by remotes
+
+        ssn = self.connection.session_head(NEED_CLOSE)
+        while ssn:
+            print("session close")
+            ssn.close()
+            ssn = ssn.next(NEED_CLOSE)
+
+        if self.connection.state == (NEED_CLOSE):
+            print("conn close")
+            self.connection.close()
+
+    def send_update(self, delivery):
+        print("Got a send update delivery! tag=%s" % delivery.tag)
+        print("  writable=%s" % delivery.writable)
+        print("  readable=%s" % delivery.readable)
+        print("  updated=%s" % delivery.updated)
+        print("  pending=%s" % delivery.pending)
+        print("  partial=%s" % delivery.partial)
+        print("  local_state=%s" % delivery.local_state)
+        print("  remote_state=%s" % delivery.remote_state)
+        print("  settled=%s" % delivery.settled)
+        # do something... smart.
+        self._do_send(delivery.link)
+
+    def recv_ready(self, delivery):
+        print("Got a recv_ready delivery! tag=%s" % delivery.tag)
+        print("  writable=%s" % delivery.writable)
+        print("  readable=%s" % delivery.readable)
+        print("  updated=%s" % delivery.updated)
+        print("  pending=%s" % delivery.pending)
+        print("  partial=%s" % delivery.partial)
+        print("  local_state=%s" % delivery.local_state)
+        print("  remote_state=%s" % delivery.remote_state)
+        print("  settled=%s" % delivery.settled)
+        self._do_receive(delivery.link)
+
+    def _do_send(self, sender):
+        # hacky send example
         print("do_send")
+        if sender.current:
+            print "Current delivery = %s" % sender.current.tag
+
         if self.msgs_sent < self.msg_count:
             print "sender.credit %s" % sender.credit
             #if sender.credit == 0:
@@ -115,7 +218,7 @@ class Peer(sockettransport.SocketTransport):
             msg = proton.Message()
             msg.address="amqp://0.0.0.0:5672"
             msg.subject="Hello World!"
-            msg.body = "First the world, then the galaxy!"
+            msg.body = "First OpenStack, then the WORLD!!!!"
 
 
             self.msgs_sent += 1
@@ -136,12 +239,19 @@ class Peer(sockettransport.SocketTransport):
 
 
 
-    def do_recv(self, receiver):
+    def _do_receive(self, receiver):
         print("do_recv")
+
+        if receiver.current:
+            print "Current delivery = %s" % receiver.current.tag
+
+        # should I grant more credit???
         if receiver.credit == 0:
             if self.replys_received < self.msg_count:
                 receiver.flow(1)
-        
+
+
+
 
 
 def main(argv=None):
@@ -211,7 +321,7 @@ def main(argv=None):
         #pn_link_open(slink)
         #pn_link_open(rlink)
 
-        peers.add(Peer(uuid.uuid4().hex, s, opts.msg_count))
+        peers.add(Peer(uuid.uuid4().hex, s, opts.msg_count, opts.get_replies))
 
     sent = 0
     replies = 0
@@ -240,88 +350,11 @@ def main(argv=None):
         # Protocol processing
         #
 
-        NEED_INIT = proton.Endpoint.LOCAL_UNINIT
-        NEED_CLOSE = (proton.Endpoint.LOCAL_ACTIVE|proton.Endpoint.REMOTE_CLOSED)
-        ACTIVE = (proton.Endpoint.LOCAL_ACTIVE|proton.Endpoint.REMOTE_ACTIVE)
-
         while active_peers:
             peer = active_peers.pop()
+            peer.process_connection()
+            # @todo check for closed connections and sockets!!!
 
-            # wait for authentication
-            if peer.sasl:
-                if peer.sasl.state not in (proton.SASL.STATE_PASS,
-                                           proton.SASL.STATE_FAIL):
-                    print("SASL wait.")
-                    continue
-                if peer.sasl.state == proton.SASL.STATE_FAIL:
-                    print("SASL failed for peer %s" % str(peer))
-                    continue
-
-            conn = peer.connection
-            # do state machine processing on conn
-            if conn.state & NEED_INIT:
-                print("Initializing connection")
-                conn.open()
-                ssn = conn.session()
-
-            ssn = conn.session_head(NEED_INIT)
-            while ssn:
-                print("Initializing session")
-                ssn.open()
-                sender = ssn.sender("sender")
-                sender.target.address = "TARGET"
-                if opts.get_replies:
-                    receiver = ssn.receiver("receiver")
-                    receiver.source.address = "SOURCE"
-                ssn = ssn.next(NEED_INIT)
-
-            link = conn.link_head(NEED_INIT)
-            while link:
-                # @todo: initialize terminus addresses???
-                print("Initializing link")
-                link.open()
-                link = link.next(NEED_INIT)
-
-
-            link = conn.link_head(ACTIVE)
-            while link:
-                print("Link is active")
-                if link.is_receiver:
-                    peer.do_recv(link)
-                else:
-                    peer.do_send(link)
-                link = link.next(ACTIVE)
-
-            delivery = conn.work_head
-            while delivery:
-                # do something... smart.
-                print("Got a delivery! tag=%s" % delivery.tag)
-                print("  writable=%s" % delivery.writable)
-                print("  readable=%s" % delivery.readable)
-                print("  updated=%s" % delivery.updated)
-                print("  pending=%s" % delivery.pending)
-                print("  partial=%s" % delivery.partial)
-                print("  local_state=%s" % delivery.local_state)
-                print("  remote_state=%s" % delivery.remote_state)
-                print("  settled=%s" % delivery.settled)
-
-                delivery = delivery.work_next
-
-            link = conn.link_head(NEED_CLOSE)
-            while link:
-                print("Link close")
-                link.close()
-                link = link.next(NEED_CLOSE)
-
-            ssn = conn.session_head(NEED_CLOSE)
-            while ssn:
-                print("session close")
-                ssn.close()
-                ssn = ssn.next(NEED_CLOSE)
-
-            if conn.state == (NEED_CLOSE):
-                print("conn close")
-                conn.close()
 
 
     return 0
