@@ -86,6 +86,7 @@ class Peer(sockettransport.SocketTransport):
 
         super(Peer, self).__init__(socket, name)
         self.connection = proton.Connection()
+        self.connection.container = name
         self.transport.bind(self.connection)
         self.sasl = proton.SASL(self.transport)
         self.sasl.mechanisms("ANONYMOUS")
@@ -94,6 +95,7 @@ class Peer(sockettransport.SocketTransport):
         self.msg_count = count
         self.msgs_sent = 0
         self.replys_received = 0
+        self.get_replies = get_replies
 
         # protocol setup example:
 
@@ -102,12 +104,16 @@ class Peer(sockettransport.SocketTransport):
         ssn.open()
         # bi-directional links
         sender = ssn.sender("sender")
-        sender.target.address = "TARGET"
+        #sender.target.address = "%s/%s" % (self.connection.container,"TARGET")
+        sender.target.address = "some-remote-target"
+        sender.source.address = self.connection.container + "/sending-link"
         sender.open()
         self._do_send(sender)  # kick it off
         if get_replies:
             receiver = ssn.receiver("receiver")
-            receiver.source.address = "SOURCE"
+            #receiver.source.address = "%s/%s" % (self.connection.container, "SOURCE")
+            receiver.source.address = "some-remote-source"
+            receiver.target.address = self.connection.container + "/reply-to"
             receiver.open()
             receiver.flow(1)
 
@@ -188,8 +194,15 @@ class Peer(sockettransport.SocketTransport):
         print("  local_state=%s" % delivery.local_state)
         print("  remote_state=%s" % delivery.remote_state)
         print("  settled=%s" % delivery.settled)
+
         # do something... smart.
-        self._do_send(delivery.link)
+        sender = delivery.link
+        # @todo: deal with remote terminal state, if necessary
+        if delivery.settled:  # remote settled
+            delivery.settle() # now so do we
+            # and send another...
+            if self.msgs_sent < self.msg_count:
+                self._do_send(sender)
 
     def recv_ready(self, delivery):
         print("Got a recv_ready delivery! tag=%s" % delivery.tag)
@@ -218,6 +231,9 @@ class Peer(sockettransport.SocketTransport):
             msg = proton.Message()
             msg.address="amqp://0.0.0.0:5672"
             msg.subject="Hello World!"
+            if self.get_replies:
+                msg.reply_to = self.connection.container + "/reply-to"
+                #msg.reply_to = "%s/%s" % (self.connection.container, "SOURCE")
             msg.body = "First OpenStack, then the WORLD!!!!"
 
 
@@ -226,7 +242,7 @@ class Peer(sockettransport.SocketTransport):
             rc = sender.send( msg.encode() )
             print("rc=%s" % rc)
             sender.advance()  # indicates we are done writing to delivery
-            delivery.settle()
+            ##delivery.settle()
 
 
     #                     delivery = pn_delivery(d.sender, "delivery-%d" %
