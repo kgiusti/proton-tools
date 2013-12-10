@@ -28,59 +28,8 @@ socket resources.
 """
 
 
-
-
-
-class EndpointEventHandler(object):
-    """State machine interface for generic Proton endpoints
-    """
-    def __init__(self, endpoint):
-        self._endpoint = endpoint
-
-    def uninit(self):
-        """Called when local state is UNINIT."""
-        self._endpoint.open()
-
-    def active(self):
-        """Called while both local and remote states are ACTIVE."""
-        pass  # type specific
-
-    def remoteClosed(self):
-        """Called when local state is ACTIVE and remote state is CLOSED."""
-        self._endpoint.close()
-
-    def closed(self):
-        """Called while both local and remote states are CLOSED."""
-        pass # optional
-
-
-class ReceiverEventHandler(EndpointEventHandler):
-    """Process state changes to a Proton Receive Link."""
-    def __init__(self, link):
-        super(ReceiverEventHandler, self).__init__(link)
-
-    def active(self):
-        pass
-
-    def closed(self):
-        pass
-
-
-class SenderEventHandler(EndpointEventHandler):
-    """Process state changes to a Proton Sender Link."""
-    def __init__(self, link):
-        super(SenderEventHandler, self).__init__(link)
-
-    def active(self):
-        pass
-
-    def closed(self):
-        pass
-
-
-
 class Peer(sockettransport.SocketTransport):
-    """Represents a remote destination for messages send by this client.
+    """Represents a remote container for messages send by this client.
     """
     def __init__(self, name, socket, count, get_replies):
 
@@ -104,16 +53,14 @@ class Peer(sockettransport.SocketTransport):
         ssn.open()
         # bi-directional links
         sender = ssn.sender("sender")
-        #sender.target.address = "%s/%s" % (self.connection.container,"TARGET")
-        sender.target.address = "some-remote-target"
-        sender.source.address = self.connection.container + "/sending-link"
+        #sender.target.address = "some-remote-target"
+        #sender.source.address = self.connection.container + "/sending-link"
         sender.open()
         self._do_send(sender)  # kick it off
         if get_replies:
             receiver = ssn.receiver("receiver")
-            #receiver.source.address = "%s/%s" % (self.connection.container, "SOURCE")
-            receiver.source.address = "some-remote-source"
-            receiver.target.address = self.connection.container + "/reply-to"
+            #receiver.source.address = "some-remote-source"
+            #receiver.target.address = self.connection.container + "/reply-to"
             receiver.open()
             receiver.flow(1)
 
@@ -185,6 +132,8 @@ class Peer(sockettransport.SocketTransport):
             self.connection.close()
 
     def send_update(self, delivery):
+        """Callback to process the status of a previously-sent message.
+        """
         print("Got a send update delivery! tag=%s" % delivery.tag)
         print("  writable=%s" % delivery.writable)
         print("  readable=%s" % delivery.readable)
@@ -205,6 +154,8 @@ class Peer(sockettransport.SocketTransport):
                 self._do_send(sender)
 
     def recv_ready(self, delivery):
+        """Callback to handle an inbound delivery.
+        """
         print("Got a recv_ready delivery! tag=%s" % delivery.tag)
         print("  writable=%s" % delivery.writable)
         print("  readable=%s" % delivery.readable)
@@ -232,10 +183,9 @@ class Peer(sockettransport.SocketTransport):
             msg.address="amqp://0.0.0.0:5672"
             msg.subject="Hello World!"
             if self.get_replies:
-                msg.reply_to = self.connection.container + "/reply-to"
-                #msg.reply_to = "%s/%s" % (self.connection.container, "SOURCE")
+                # messenger expects reply to in this format (huh?)
+                msg.reply_to = "amqp://" + self.connection.container
             msg.body = "First OpenStack, then the WORLD!!!!"
-
 
             self.msgs_sent += 1
             delivery = sender.delivery( "%s" % self.msgs_sent )
@@ -244,22 +194,23 @@ class Peer(sockettransport.SocketTransport):
             sender.advance()  # indicates we are done writing to delivery
             ##delivery.settle()
 
-
-    #                     delivery = pn_delivery(d.sender, "delivery-%d" %
-    #                                            d.msgs_pending)
-    #                     rc = pn_link_send(d.sender, "message")
-    #                     assert(rc >= 0)
-    #                     d.msgs_pending -= 1
-    #                     pn_link_advance(d.sender)
-    #                     pn_delivery_settle(delivery)
-
-
-
     def _do_receive(self, receiver):
+        """Process a received message"""
         print("do_recv")
 
-        if receiver.current:
-            print "Current delivery = %s" % receiver.current.tag
+        delivery = receiver.current
+        if delivery and delivery.readable:
+            # @todo what about partial?
+            data = receiver.recv(delivery.pending)
+            msg = proton.Message()
+            msg.decode(data)
+            print("Reply body=[%s]" % str(msg.body))
+            receiver.advance()
+
+            delivery.update(proton.Delivery.ACCEPTED)
+            delivery.settle()
+
+            self.replys_received += 1
 
         # should I grant more credit???
         if receiver.credit == 0:
@@ -280,23 +231,12 @@ def main(argv=None):
                       help="Send <n> messages to each target")
     parser.add_option("-R", dest="get_replies", action="store_true",
                       help="Wait for a reply from each message")
-    #parser.add_option("-H", dest="hostname",
-    #                  help="Address to listen on for responses")
 
     opts, msg_text = parser.parse_args(args=argv)
     if not msg_text:
         msg_text = "Hey There!"
     if opts.targets is None:
         opts.targets = ["amqp://0.0.0.0:5672"]
-
-    # listener = None
-    # reply_addr = None
-    # hostname = opts.hostname || socket.gethostname()
-    # listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # listener.setblocking(0) # non-blocking
-    # listener.bind((socket.getfqdn(hostname),0))
-    # reply_addr = "amqp://%s:%d" % listener.getsockname()
-    # listener.listen(5)
 
     peers = sockettransport.SocketTransports()
 
@@ -320,22 +260,6 @@ def main(argv=None):
         except socket.error, e:
             if e[0] != errno.EINPROGRESS:
                 raise
-
-        # ssn = pn_session(conn)
-        # slink = pn_sender(ssn, "sender")
-        # dst = pn_link_target(slink)
-        # pn_terminus_set_address(dst, "socket-target")
-        # rlink = None
-        # if opts.get_replies:
-        #     rlink = pn_receiver(ssn, "receiver")
-        #     src = pn_link_src(rlink)
-        #     pn_terminus_set_address(src, "socket-source")
-
-        # now open all the engine endpoints
-        #pn_connection_open(conn)
-        #pn_session_open(ssn)
-        #pn_link_open(slink)
-        #pn_link_open(rlink)
 
         peers.add(Peer(uuid.uuid4().hex, s, opts.msg_count, opts.get_replies))
 
@@ -371,147 +295,7 @@ def main(argv=None):
             peer.process_connection()
             # @todo check for closed connections and sockets!!!
 
-
-
     return 0
-
-    #         #########################
-
-
-    #         if ((d.sender.link_state() & (PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE)) == (PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE)):
-    #             if d.msgs_pending:
-    #                 while pn_link_credit(d.sender) > 0 and d.msgs_pending:
-    #                     delivery = pn_delivery(d.sender, "delivery-%d" %
-    #                                            d.msgs_pending)
-    #                     rc = pn_link_send(d.sender, "message")
-    #                     assert(rc >= 0)
-    #                     d.msgs_pending -= 1
-    #                     pn_link_advance(d.sender)
-    #                     pn_delivery_settle(delivery)
-    #                 if pn_link_credit(d.sender) == 0:
-    #                     if d.msgs_pending > 0:
-    #                         pn_link_offer(d.sender, d.msgs_pending)
-    #             else:
-    #                 d.sender.close()
-    #         elif ((d.sender.link.state() & PN_REMOTE_CLOSED)):
-    #             if (d.sender.link.state() & PN_LOCAL_ACTIVE):
-    #                 d.sender.close()
-
-    #         if ((d.receiver.link_state() & (PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE)) == (PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE)):
-
-    #             while pn_link_queued(d.receiver) > 0:
-    #                 delivery = pn_link_current(d.receiver)
-    #                 # read all bytes of message
-    #                 rc, msg = pn_link_recv(receiver.link,
-    #                                        pn_delivery_pending(delivery))
-    #                 assert(rc >= 0)
-    #                 d.replies_received += 1
-    #                 pn_delivery_update(delivery, PN_ACCEPTED)
-    #                 pn_link_advance(d.receiver)
-    #                 pn_delivery_settle(delivery)
-
-    #             if d.replies_received < opts.msg_count:
-    #                 if pn_link_remote_credit(d.receiver) == 0:
-    #                     pn_link_flow(d.receiver, 1)
-    #             else:
-    #                 d.receiver.close()
-    #         elif ((d.receiver.link.state() & PN_REMOTE_CLOSED)):
-    #             if (d.receiver.link.state() & PN_LOCAL_ACTIVE):
-    #                 d.receiver.close()
-
-
-
-    #     # if connection down, mark destination done
-    #     # if msgs remain and credit, send msg
-    #     # if msgs remain and no credit, send offer
-    #     # if no msg remain, send drained
-    #     # once all sent msgs settled, sender done
-    #     # if replies and replies available
-    #     #   recv and settle them
-    #     #   once all recv deliveries settled, recv done
-
-    # # wait until we authenticate with the server
-    # while pn_sasl_state(sender.sasl) not in (PN_SASL_PASS, PN_SASL_FAIL):
-    #     sender.wait()
-    #     if sender.closed():
-    #         sender.log("connection failed")
-    #         return -1;
-
-    # if pn_sasl_state(sender.sasl) == PN_SASL_FAIL:
-    #     print("Error: Authentication failure")
-    #     return -1
-
-
-
-    # sent = 0
-    # while send < opts.msg_count:
-    # pendingSends = list(options.messages)
-    # while pendingSends:
-    #     # wait until the server grants us some send credit
-    #     if pn_link_credit(sender.link) == 0:
-    #         sender.log("wait for credit")
-    #         sender.wait()
-
-    #     while pn_link_credit(sender.link) > 0 and not sender.closed():
-    #         msg = pendingSends.pop(0)
-    #         sender.log("sending %s" % msg)
-    #         d = pn_delivery(sender.link, "post-delivery-%s" % len(pendingSends))
-    #         rc = pn_link_send(sender.link, msg)
-    #         if (rc < 0):
-    #             print("Error: sending message: %s" % rc)
-    #             return -2
-    #         assert rc == len(msg)
-    #         pn_link_advance(sender.link)  # deliver the message
-
-    #     # settle any deliveries that the server has accepted
-    #     sender.settle()
-
-    # def settle(self):
-    #     """ In order to be sure that the remote has accepted the message, we
-    #     need to wait until the message's delivery has been remotely settled.
-    #     Once that occurs, we can release the delivery by settling it.
-    #     """
-    #     d = pn_unsettled_head(self.link)
-    #     while d:
-    #         _next = pn_unsettled_next(d)
-    #         # if the remote has either settled this delivery OR set the
-    #         # disposition, we consider the message received.
-    #         disp = pn_delivery_remote_state(d)
-    #         if disp and disp != PN_ACCEPTED:
-    #             print("Warning: message was not accepted by the remote!")
-    #         if disp or pn_delivery_settled(d):
-    #             pn_delivery_settle(d)
-    #         d = _next
-
-
-    # # done sending, now block until any pending deliveries are settled
-    # sender.log("Done sending messages, waiting for deliveries to settle...");
-    # while pn_link_unsettled(sender.link) > 0 and not sender.closed():
-    #     sender.wait()
-    #     sender.settle()
-
-
-
-    # print "Sending to %s, server=%s exchange=%s namespace=%s fanout=%s" % (
-    #     topic, opts.server, opts.exchange, opts.namespace, str(opts.fanout))
-
-    # # teardown
-    # for conn in conns:
-    #     pn_connection_close(conn)
-    #     # now wait for the connector to close
-    #     while not pn_connector_closed(self.cxtr):
-    #         self.wait()
-
-    # for link in links:
-    #     pn_link_free(link);
-
-    # for ssn in sessions:
-    #     pn_session_free(ssn);
-
-    # for conn in conns:
-    #     pn_connection_free(conn);
-    #     pn_connector_free(cxtr);
-
 
 
 if __name__ == "__main__":
