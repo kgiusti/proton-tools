@@ -65,11 +65,13 @@ class SocketTransport(object):
         """
         return self._next_tick
 
+    @property
     def need_read(self):
         """True when the Transport requires data from the network layer.
         """
         return (not self._read_done) and self._transport.capacity() > 0
 
+    @property
     def need_write(self):
         """True when the Transport has data to write to the network layer.
         """
@@ -122,6 +124,7 @@ class SocketTransport(object):
         """Write data to the network layer.  Can support both blocking and
         non-blocking sockets.
         """
+        # @todo - KAG: need to explicitly document error return codes/exceptions!!!
         if self._write_done:
             return None
 
@@ -162,6 +165,7 @@ class SocketTransport(object):
                 raise
         return 0
 
+    @property
     def done(self):
         return self._write_done and self._read_done
 
@@ -174,6 +178,9 @@ class SocketTransports(object):
     def __init__(self):
         self._transports = {}
         self._timer_heap = [] # (next_tick, sockettransport)
+
+    def __iter__(self):
+        return self._transports.itervalues()
 
     def add(self, socket_transport):
         if not socket_transport.name:
@@ -192,9 +199,9 @@ class SocketTransports(object):
         readfd = []
         writefd = []
         for st in self._transports.itervalues():
-            if st.need_read():
+            if st.need_read:
                 readfd.append(st)
-            if st.need_write():
+            if st.need_write:
                 writefd.append(st)
         return (readfd, writefd)
 

@@ -20,6 +20,7 @@
 import optparse, sys, time, uuid
 import re, socket, select, errno
 import sockettransport
+import interconnect
 import proton
 
 """
@@ -31,13 +32,41 @@ socket resources.
 class Peer(sockettransport.SocketTransport):
     """Represents a remote container for messages send by this client.
     """
+
+    class _EndpointHandler(interconnect.EndpointEventHandler):
+        def __init__(self, peer):
+            self._peer = peer
+
+        def sasl_done(self, sasl):
+            print("SASL failed for peer %s" % str(self._peer.name))
+
+        def delivery_update(self, delivery):
+            print("delivery update")
+            print("  writable=%s" % delivery.writable)
+            print("  readable=%s" % delivery.readable)
+            print("  updated=%s" % delivery.updated)
+            print("  pending=%s" % delivery.pending)
+            print("  partial=%s" % delivery.partial)
+            print("  local_state=%s" % delivery.local_state)
+            print("  remote_state=%s" % delivery.remote_state)
+            print("  settled=%s" % delivery.settled)
+
+            if delivery.link.is_sender:
+                self._peer.send_update(delivery)
+            else:
+                self._peer.recv_ready(delivery)
+
+
     def __init__(self, name, socket, count, get_replies):
 
         super(Peer, self).__init__(socket, name)
-        self.connection = proton.Connection()
-        self.connection.container = name
-        self.transport.bind(self.connection)
+
         self.sasl = proton.SASL(self.transport)
+        self.interconnect = interconnect.Interconnect(Peer._EndpointHandler(self),
+                                         self.sasl)
+        self.interconnect.connection.container = name
+        self.transport.bind(self.interconnect.connection)
+        self.transport.trace(proton.Transport.TRACE_FRM)
         self.sasl.mechanisms("ANONYMOUS")
         self.sasl.client()
 
@@ -48,158 +77,61 @@ class Peer(sockettransport.SocketTransport):
 
         # protocol setup example:
 
-        self.connection.open()
-        ssn = self.connection.session()
-        ssn.open()
+        ssn = self.interconnect.connection.session()
         # bi-directional links
         sender = ssn.sender("sender")
         #sender.target.address = "some-remote-target"
         #sender.source.address = self.connection.container + "/sending-link"
-        sender.open()
-        self._do_send(sender)  # kick it off
+        delivery = sender.delivery( "%s" % self.msgs_sent )
+
         if get_replies:
             receiver = ssn.receiver("receiver")
+            receiver.flow(1)
             #receiver.source.address = "some-remote-source"
             #receiver.target.address = self.connection.container + "/reply-to"
-            receiver.open()
-            receiver.flow(1)
 
-    """
-    Boilerplate Proton protocol processing.
-    """
-    def process_connection(self):
-
-        NEED_INIT = proton.Endpoint.LOCAL_UNINIT
-        NEED_CLOSE = (proton.Endpoint.LOCAL_ACTIVE|proton.Endpoint.REMOTE_CLOSED)
-
-        # wait until SASL has authenticated
-        if self.sasl:
-            if self.sasl.state not in (proton.SASL.STATE_PASS,
-                                       proton.SASL.STATE_FAIL):
-                print("SASL wait.")
-                return
-
-            if self.sasl.state == proton.SASL.STATE_FAIL:
-                # @todo connection failure - must notify the application!
-                print("SASL failed for peer %s" % str(self.name))
-                return
-
-        # open all uninitialized endpoints
-
-        if self.connection.state & NEED_INIT:
-            print("Initializing connection")
-            self.connection.open()
-
-        ssn = self.connection.session_head(NEED_INIT)
-        while ssn:
-            print("Initializing session")
-            ssn.open()
-            ssn = ssn.next(NEED_INIT)
-
-        link = self.connection.link_head(NEED_INIT)
-        while link:
-            # @todo: initialize terminus addresses???
-            print("Initializing link")
-            link.open()
-            link = link.next(NEED_INIT)
-
-        link = self.connection.link_head(NEED_CLOSE)
-        while link:
-            print("Link close")
-            link.close()
-            link = link.next(NEED_CLOSE)
-
-        # process the work queue
-
-        delivery = self.connection.work_head
-        while delivery:
-            if delivery.link.is_sender:
-                self.send_update(delivery)
-            else:
-                self.recv_ready(delivery)
-            delivery = delivery.work_next
-
-        # close all endpoints closed by remotes
-
-        ssn = self.connection.session_head(NEED_CLOSE)
-        while ssn:
-            print("session close")
-            ssn.close()
-            ssn = ssn.next(NEED_CLOSE)
-
-        if self.connection.state == (NEED_CLOSE):
-            print("conn close")
-            self.connection.close()
+    @property
+    def finished(self):
+        return (self.msgs_sent == self.msg_count and
+                ((not self.get_replies) or self.replys_received == self.msg_count))
 
     def send_update(self, delivery):
-        """Callback to process the status of a previously-sent message.
+        """Callback to process the status of a sender's delivery.
         """
         print("Got a send update delivery! tag=%s" % delivery.tag)
-        print("  writable=%s" % delivery.writable)
-        print("  readable=%s" % delivery.readable)
-        print("  updated=%s" % delivery.updated)
-        print("  pending=%s" % delivery.pending)
-        print("  partial=%s" % delivery.partial)
-        print("  local_state=%s" % delivery.local_state)
-        print("  remote_state=%s" % delivery.remote_state)
-        print("  settled=%s" % delivery.settled)
 
         # do something... smart.
         sender = delivery.link
         # @todo: deal with remote terminal state, if necessary
         if delivery.settled:  # remote settled
+            self.msgs_sent += 1
             delivery.settle() # now so do we
             # and send another...
             if self.msgs_sent < self.msg_count:
-                self._do_send(sender)
+                delivery = sender.delivery( "%s" % self.msgs_sent )
 
-    def recv_ready(self, delivery):
-        """Callback to handle an inbound delivery.
-        """
-        print("Got a recv_ready delivery! tag=%s" % delivery.tag)
-        print("  writable=%s" % delivery.writable)
-        print("  readable=%s" % delivery.readable)
-        print("  updated=%s" % delivery.updated)
-        print("  pending=%s" % delivery.pending)
-        print("  partial=%s" % delivery.partial)
-        print("  local_state=%s" % delivery.local_state)
-        print("  remote_state=%s" % delivery.remote_state)
-        print("  settled=%s" % delivery.settled)
-        self._do_receive(delivery.link)
-
-    def _do_send(self, sender):
-        # hacky send example
-        print("do_send")
-        if sender.current:
-            print "Current delivery = %s" % sender.current.tag
-
-        if self.msgs_sent < self.msg_count:
+        elif delivery.writable:
+            print("Sending a message")
             print "sender.credit %s" % sender.credit
-            #if sender.credit == 0:
-            #    print("requesting credit")
-            #    sender.offered(self.msg_count - self.msgs_sent)
+            # @todo    sender.offered(self.msg_count - self.msgs_sent)
 
             msg = proton.Message()
             msg.address="amqp://0.0.0.0:5672"
             msg.subject="Hello World!"
             if self.get_replies:
                 # messenger expects reply to in this format (huh?)
-                msg.reply_to = "amqp://" + self.connection.container
+                msg.reply_to = "amqp://" + self.interconnect.connection.container
             msg.body = "First OpenStack, then the WORLD!!!!"
-
-            self.msgs_sent += 1
-            delivery = sender.delivery( "%s" % self.msgs_sent )
             rc = sender.send( msg.encode() )
-            print("rc=%s" % rc)
-            sender.advance()  # indicates we are done writing to delivery
-            ##delivery.settle()
+            print("rc=%s" % rc)  # @todo handle this failure
+            sender.advance()  # indicates we are done writing to the delivery
 
-    def _do_receive(self, receiver):
-        """Process a received message"""
-        print("do_recv")
-
-        delivery = receiver.current
-        if delivery and delivery.readable:
+    def recv_ready(self, delivery):
+        """Callback to handle an inbound delivery.
+        """
+        print("Got a recv_ready delivery! tag=%s" % delivery.tag)
+        receiver = delivery.link
+        if delivery.readable:
             # @todo what about partial?
             data = receiver.recv(delivery.pending)
             msg = proton.Message()
@@ -212,13 +144,10 @@ class Peer(sockettransport.SocketTransport):
 
             self.replys_received += 1
 
-        # should I grant more credit???
-        if receiver.credit == 0:
-            if self.replys_received < self.msg_count:
-                receiver.flow(1)
-
-
-
+            # should I grant more credit???
+            if receiver.credit == 0:
+                if self.replys_received < self.msg_count:
+                    receiver.flow(1)
 
 
 def main(argv=None):
@@ -292,8 +221,15 @@ def main(argv=None):
 
         while active_peers:
             peer = active_peers.pop()
-            peer.process_connection()
-            # @todo check for closed connections and sockets!!!
+            peer.interconnect.process_endpoints()
+
+        #
+        #
+        done = True
+        for peer in peers:
+            if not peer.finished:
+                done = False
+                break
 
     return 0
 
