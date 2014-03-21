@@ -104,7 +104,7 @@ pn_status_t deliver_message( pn_messenger_t *messenger,
     pn_tracker_t request_tracker = pn_messenger_outgoing_tracker( messenger );
 
     LOG("sending message...\n");
-    int rc = pn_messenger_send( messenger );
+    int rc = pn_messenger_send( messenger, -1 );
     if (rc) LOG( "pn_messenger_send() failed: error=%d\n", rc );
 
     result = pn_messenger_status( messenger, request_tracker );

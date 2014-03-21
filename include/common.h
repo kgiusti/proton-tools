@@ -33,7 +33,7 @@ pn_timestamp_t _now();
   { if (!(expression)) DIE(__FILE__,__LINE__, message); }
 
 #define check_messenger(m)                                      \
-  { check(pn_messenger_errno(m) == 0, pn_messenger_error(m)) }
+    { check(pn_messenger_errno(m) == 0, pn_error_text(pn_messenger_error(m))) }
 
 pn_status_t deliver_message( pn_messenger_t *messenger,
                              pn_message_t *message );
