@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+import argparse
+import sys
+
+from proton import Delivery
+from proton import Message
+from proton.handlers import MessagingHandler
+from proton.reactor import Container
+
+
+class Drain(MessagingHandler):
+    """
+    A simple receiver that connects to a server and print messages received.
+    """
+    def __init__(self, router_url, source_address):
+        super(Drain, self).__init__()
+        self.router_url = router_url
+        self.source_address = source_address
+        self.conn = None
+        self.receiver = None
+
+    def on_connection_error(self, event):
+        print("AsyncTestReceiver on_connection_error=%s" %
+              event.connection.remote_condition.description)
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def on_link_error(self, event):
+        print("AsyncTestReceiver on_link_error=%s" % event.link.remote_condition.description)
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def on_start(self, event):
+        self.conn = event.container.connect(self.router_url)
+
+    def on_connection_opened(self, event):
+        print("Connection opened")
+        event.container.create_receiver(event.connection, self.source_address)
+
+    def on_disconnected(self, event):
+        print("Disconnected")
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def on_link_opened(self, event):
+        print("link opened")
+
+    def on_link_closing(self, event):
+        print("link closing")
+        assert event.link == self.receiver
+        self.receiver.close()
+        self.receiver = None
+
+    def on_message(self, event):
+        print("Message received:")
+        print(f"====\n{event.message}\n====")
+
+    def run(self):
+        Container(self).run()
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("source",
+                        default="examples",
+                        help="source address to consume from, default='%(default)s'")
+    parser.add_argument("-v", "--verbose", help="Show maximum detail",
+                        action="count")  # support -vvv
+    parser.add_argument("-c", "--count", type=int, default=0,
+                        help="Exit after receiving COUNT messages. 0=receive continueously")
+
+
+    group = parser.add_argument_group('Connection Options')
+    group.add_argument("-u", "--url", default="amqp://localhost",
+                       metavar="URL",
+                       help="URL of the messaging bus to connect to, default=%(default)s")
+
+    #### KAG TBD:
+    # group.add_argument("-t", "--timeout", type=float, default=10, metavar="SECS",
+    #                    help="Maximum time to wait for connection in seconds, default=%(default)s")
+
+    # group.add_argument("--ssl-certificate", metavar="CERT",
+    #                    help="Client SSL certificate (PEM Format)")
+    # group.add_argument("--ssl-key", metavar="KEY",
+    #                    help="Client SSL private key (PEM Format)")
+    # group.add_argument("--ssl-trustfile", metavar="TRUSTED-CA-DB",
+    #                    help="Trusted Certificate Authority Database file (PEM Format)")
+    # group.add_argument("--ssl-password", metavar="PASSWORD",
+    #                    help="Certificate password, will be prompted if not specified.")
+    # group.add_argument("--ssl-password-file", metavar="SSL-PASSWORD-FILE",
+    #                    help="Certificate password, will be prompted if not specified.")
+    # group.add_argument("--ssl-disable-peer-name-verify", action="store_true",
+    #                    help="Disables SSL peer name verification. WARNING - This option is insecure and must not be used "
+    #                    "in production environments")
+
+    return parser.parse_args()
+
+def main(args=sys.argv):
+    try:
+        args = parse_args(args)
+        print(f"ARGS={args}")
+        drain = Drain(args.url, args.source)
+        drain.run()
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:
+        print(f"Error: {exc}")
+        import traceback
+        traceback.print_exc()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+
